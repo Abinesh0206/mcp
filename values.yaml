@@ -60,7 +60,7 @@ ollama:
   pvc:
     enabled: true
     size: 20Gi
-    storageClassName: "" # set to your EKS storageclass (e.g. gp3)
+    storageClassName: "gp3" # set to your EKS storageclass (e.g. gp3)
   model:
     name: "llama3"           # ⭐ Recommended: meta-llama-3
     tag: "8b-instruct-q4_0"  # fast + smart for 8B; adjust to your GPU/CPU
