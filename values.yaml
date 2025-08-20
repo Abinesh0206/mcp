@@ -52,10 +52,10 @@ ollama:
     port: 11434
   resources:
     requests:
-      cpu: "1.5"
+      cpu: "1"
       memory: "4Gi"
     limits:
-      cpu: "2.5"
+      cpu: "2"
       memory: "8Gi"
   pvc:
     enabled: true
