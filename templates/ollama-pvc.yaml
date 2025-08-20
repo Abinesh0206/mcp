@@ -1,0 +1,14 @@
+{{- if .Values.ollama.pvc.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-data
+spec:
+  accessModes: [ "ReadWriteOnce" ]
+  resources:
+    requests:
+      storage: {{ .Values.ollama.pvc.size }}
+  {{- if .Values.ollama.pvc.storageClassName }}
+  storageClassName: {{ .Values.ollama.pvc.storageClassName }}
+  {{- end }}
+{{- end }}

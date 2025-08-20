@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: masabot-ui
+  labels: { app: masabot-ui }
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels: { app: masabot-ui }
+  template:
+    metadata:
+      labels: { app: masabot-ui }
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          env:
+            - name: OLLAMA_BASE_URL
+              value: "{{ .Values.ui.env.OLLAMA_BASE_URL }}"
+            - name: UI_TITLE
+              value: "{{ .Values.ui.env.UI_TITLE }}"
+            - name: THEME_PRIMARY
+              value: "{{ .Values.ui.env.THEME_PRIMARY }}"
+            - name: THEME_ACCENT
+              value: "{{ .Values.ui.env.THEME_ACCENT }}"
+          {{- if .Values.mcp.useSecret }}
+            {{- range .Values.mcp.secretKeys }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.mcp.secretName }}
+                  key: {{ .name }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - containerPort: 8501
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          workingDir: /app
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              pip install --no-cache-dir -r /app/requirements.txt && \
+              streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0
+      volumes:
+        - name: code
+          configMap:
+            name: masabot-ui-code
+            items:
+              - key: app.py
+                path: app.py
+              - key: requirements.txt
+                path: requirements.txt
+              - key: mcp_config.json
+                path: mcp_config.json

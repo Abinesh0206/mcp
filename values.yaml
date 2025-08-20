@@ -1,0 +1,69 @@
+namespace: masabot
+
+ui:
+  image:
+    repository: python
+    tag: "3.11-slim"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations: # EKS LB annotations (optional)
+      service.beta.kubernetes.io/aws-load-balancer-type: "nlb" # or "nlb-ip"
+      # service.beta.kubernetes.io/aws-load-balancer-internal: "true" # uncomment for private LB
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "1Gi"
+  env:
+    OLLAMA_BASE_URL: "http://ollama:11434"
+    UI_TITLE: "MasaBot"
+    THEME_PRIMARY: "#1e88e5" # blue
+    THEME_ACCENT:  "#ff6f00" # orange
+  ingress:
+    enabled: false
+    className: alb
+    host: masabot.example.com
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+
+mcp:
+  # If your MCP servers need tokens, put them in a Kubernetes Secret (see ui-secret.yaml)
+  useSecret: true
+  secretName: mcp-secrets
+  secretKeys: # keys to create (optional)
+    - name: K8S_MCP_TOKEN
+    - name: JENKINS_MCP_TOKEN
+    - name: ARGOCD_MCP_TOKEN
+
+ollama:
+  image:
+    repository: ollama/ollama
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 11434
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  pvc:
+    enabled: true
+    size: 20Gi
+    storageClassName: "" # set to your EKS storageclass (e.g. gp3)
+  model:
+    name: "llama3"           # ⭐ Recommended: meta-llama-3
+    tag: "8b-instruct-q4_0"  # fast + smart for 8B; adjust to your GPU/CPU
+    # Alternatives:
+    #   mistral: "7b-instruct-v0.2-q4_0"
+    #   llama3:  "8b-instruct-q4_K_M" (if GPU)

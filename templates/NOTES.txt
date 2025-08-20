@@ -1,0 +1,5 @@
+MasaBot UI URL:
+- If Service type=LoadBalancer:  kubectl -n {{ .Values.namespace }} get svc masabot-ui -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+- If Ingress:                    http://{{ .Values.ui.ingress.host }}
+Ollama is internal at http://ollama:11434
+Edit mcp_config.json ConfigMap to point to your MCP servers.

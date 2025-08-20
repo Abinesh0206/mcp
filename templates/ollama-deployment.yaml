@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  labels: { app: ollama }
+spec:
+  replicas: {{ .Values.ollama.replicas }}
+  selector:
+    matchLabels: { app: ollama }
+  template:
+    metadata:
+      labels: { app: ollama }
+    spec:
+      containers:
+        - name: ollama
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          ports:
+            - containerPort: 11434
+          resources:
+            requests:
+              cpu: {{ .Values.ollama.resources.requests.cpu }}
+              memory: {{ .Values.ollama.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.ollama.resources.limits.cpu }}
+              memory: {{ .Values.ollama.resources.limits.memory }}
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    # pre-pull the model for faster first response
+                    sleep 3
+                    ollama pull {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} || true
+      volumes:
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-data

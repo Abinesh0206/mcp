@@ -1,0 +1,27 @@
+{
+  "servers": [
+    {
+      "name": "kubernetes",
+      "type": "http",
+      "baseUrl": "http://kubernetes-mcp.example.internal",
+      "authHeader": "Bearer ${K8S_MCP_TOKEN}"
+    },
+    {
+      "name": "jenkins",
+      "type": "http",
+      "baseUrl": "http://jenkins-mcp.example.com",
+      "authHeader": "Bearer ${JENKINS_MCP_TOKEN}"
+    },
+    {
+      "name": "argocd",
+      "type": "http",
+      "baseUrl": "http://argocd-mcp.example.com",
+      "authHeader": "Bearer ${ARGOCD_MCP_TOKEN}"
+    }
+  ],
+  "routing": [
+    { "matcher": "deploy|sync|rollback|argo", "server": "argocd" },
+    { "matcher": "pod|logs|cluster|k8s|namespace|node", "server": "kubernetes" },
+    { "matcher": "build|job|pipeline|jenkins", "server": "jenkins" }
+  ]
+}
