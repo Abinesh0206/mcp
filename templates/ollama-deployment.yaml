@@ -27,16 +27,20 @@ spec:
           volumeMounts:
             - name: ollama-data
               mountPath: /root/.ollama
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - |
-                    # pre-pull the model for faster first response
-                    sleep 3
-                    ollama pull {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} || true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ollama serve &
+              sleep 5
+              echo "Preloading model {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }}"
+              ollama run {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} --prompt "Hello" || true
+              wait
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 10
       volumes:
         - name: ollama-data
           persistentVolumeClaim:
