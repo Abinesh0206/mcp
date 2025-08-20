@@ -24,22 +24,23 @@ def mcp_route(user_text: str):
     return None
 
 def call_mcp_http(server, user_text: str):
-    """Very simple HTTP call to MCP server.
-       Expecting MCP servers to expose a /query endpoint that accepts JSON:
-       { "query": "<text>" } -> { "result": "<text>" }
-    """
+    """Call MCP server. Supports /query or /chat automatically."""
     base = server["baseUrl"].rstrip("/")
     headers = {}
     authHeader = server.get("authHeader")
     if authHeader:
-        # expand ${ENV} tokens
         expanded = re.sub(r"\$\{([^}]+)\}", lambda m: os.getenv(m.group(1), ""), authHeader)
         headers["Authorization"] = expanded
+
     try:
+        # First try /query
         resp = requests.post(f"{base}/query", json={"query": user_text}, headers=headers, timeout=60)
+        if resp.status_code == 404:  # fallback to /chat
+            resp = requests.post(f"{base}/chat", json={"prompt": user_text}, headers=headers, timeout=60)
         resp.raise_for_status()
         js = resp.json()
-        return js.get("result", json.dumps(js))
+        # normalize response
+        return js.get("result") or js.get("answer") or js.get("message") or json.dumps(js)
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
@@ -125,7 +126,6 @@ if user_text:
             answer = call_mcp_http(target, user_text)
     else:
         with st.spinner("Thinking with Ollama…"):
-            # model string matches values.yaml default
             answer = call_ollama(user_text, model="llama3:8b-instruct-q4_0")
 
     msgs.append({"role":"assistant","content":answer})
