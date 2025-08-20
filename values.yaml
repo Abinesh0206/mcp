@@ -10,7 +10,7 @@ ui:
     type: LoadBalancer
     port: 80
     annotations: # EKS LB annotations (optional)
-      service.beta.kubernetes.io/aws-load-balancer-type: "nlb" # or "nlb-ip"
+      service.beta.kubernetes.io/aws-load-balancer-type: "elb" # or "nlb-ip"
       # service.beta.kubernetes.io/aws-load-balancer-internal: "true" # uncomment for private LB
   resources:
     requests:
