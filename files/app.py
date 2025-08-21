@@ -44,7 +44,7 @@ def call_mcp_http(server, user_text: str):
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
-def call_ollama(user_text: str, system=None, model="llama3:8b-instruct-q4_0"):
+def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
     """Chat call to Ollama /api/chat for better instruction following."""
     payload = {
         "model": model,
