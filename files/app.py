@@ -1,5 +1,4 @@
-import os, json, re, time
-import requests
+import os, json, re, requests
 import streamlit as st
 
 # ---------- Config ----------
@@ -45,20 +44,17 @@ def call_mcp_http(server, user_text: str):
         return f"[MCP:{server['name']}] error: {e}"
 
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    """Chat call to Ollama /api/chat for better instruction following."""
+    """Call Ollama /api/generate (works in all versions)."""
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system or "You are MasaBot, a helpful DevOps assistant."},
-            {"role": "user", "content": user_text}
-        ],
+        "prompt": f"{system or 'You are MasaBot, a helpful DevOps assistant.'}\n\nUser: {user_text}\nAssistant:",
         "stream": False
     }
     try:
-        r = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120)
+        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=120)
         r.raise_for_status()
         js = r.json()
-        return js.get("message", {}).get("content", "")
+        return js.get("response", "")
     except Exception as e:
         return f"[Ollama] error: {e}"
 
@@ -126,7 +122,7 @@ if user_text:
             answer = call_mcp_http(target, user_text)
     else:
         with st.spinner("Thinking with Ollama…"):
-            answer = call_ollama(user_text, model="llama3:8b-instruct-q4_0")
+            answer = call_ollama(user_text, model="mistral:7b-instruct-v0.2-q4_0")
 
     msgs.append({"role":"assistant","content":answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
