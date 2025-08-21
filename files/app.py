@@ -43,17 +43,24 @@ def call_mcp_http(server, user_text: str):
         return f"[MCP:{server['name']}] error: {e}"
 
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    """Call Ollama /api/generate."""
+    """Call Ollama /api/generate with streaming support."""
     payload = {
         "model": model,
         "prompt": f"{system or 'You are MasaBot, a helpful DevOps assistant.'}\n\nUser: {user_text}\nAssistant:",
-        "stream": False
+        "stream": True
     }
     try:
-        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=120)
+        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, stream=True, timeout=120)
         r.raise_for_status()
-        js = r.json()
-        return js.get("response") or js.get("message") or json.dumps(js)
+        response_text = ""
+        for line in r.iter_lines():
+            if not line:
+                continue
+            js = json.loads(line.decode("utf-8"))
+            if js.get("done"):
+                break
+            response_text += js.get("response", "")
+        return response_text.strip()
     except Exception as e:
         return f"[Ollama] error: {e}"
 
