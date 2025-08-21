@@ -2,38 +2,45 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ollama
-  labels: { app: ollama }
+  namespace: masabot
+  labels:
+    app: ollama
 spec:
-  replicas: {{ .Values.ollama.replicas }}
+  replicas: 1
   selector:
-    matchLabels: { app: ollama }
+    matchLabels:
+      app: ollama
   template:
     metadata:
-      labels: { app: ollama }
+      labels:
+        app: ollama
     spec:
       containers:
         - name: ollama
-          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
-          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 11434
           resources:
             requests:
-              cpu: {{ .Values.ollama.resources.requests.cpu }}
-              memory: {{ .Values.ollama.resources.requests.memory }}
+              cpu: "2"
+              memory: "8Gi"
             limits:
-              cpu: {{ .Values.ollama.resources.limits.cpu }}
-              memory: {{ .Values.ollama.resources.limits.memory }}
+              cpu: "4"
+              memory: "16Gi"
           volumeMounts:
             - name: ollama-data
               mountPath: /root/.ollama
           command: ["/bin/sh", "-c"]
           args:
             - |
+              # Start ollama server in background
               ollama serve &
               sleep 5
-              echo "Preloading model {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }}"
-              ollama run {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} --prompt "Hello" || true
+              echo "⚡ Preloading model mistral:7b-instruct-v0.2-q4_0 ..."
+              ollama pull mistral:7b-instruct-v0.2-q4_0 || true
+              # Warm-up run so model is cached
+              ollama run mistral:7b-instruct-v0.2-q4_0 --prompt "Hello" || true
               wait
           readinessProbe:
             httpGet:
