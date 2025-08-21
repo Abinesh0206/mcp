@@ -62,8 +62,8 @@ ollama:
     size: 20Gi
     storageClassName: "gp3" # set to your EKS storageclass (e.g. gp3)
   model:
-    name: "llama3"           # ⭐ Recommended: meta-llama-3
-    tag: "8b-instruct-q4_0"  # fast + smart for 8B; adjust to your GPU/CPU
+    name: "mistral"           # ⭐ Recommended: meta-llama-3
+    tag: "7b-instruct-v0.2-q4_0"  # fast + smart for 8B; adjust to your GPU/CPU
     # Alternatives:
     #   mistral: "7b-instruct-v0.2-q4_0"
     #   llama3:  "8b-instruct-q4_K_M" (if GPU)
