@@ -59,7 +59,7 @@ ollama:
       memory: "8Gi"
   pvc:
     enabled: true
-    size: 20Gi
+    size: 40Gi
     storageClassName: "gp3" # set to your EKS storageclass (e.g. gp3)
   model:
     name: "mistral"           # ⭐ Recommended: meta-llama-3
