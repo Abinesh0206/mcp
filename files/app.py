@@ -32,13 +32,14 @@ def call_mcp_http(server, user_text: str):
         headers["Authorization"] = expanded
 
     try:
-        # First try /query
-        resp = requests.post(f"{base}/query", json={"query": user_text}, headers=headers, timeout=60)
+        # First try /query with correct key
+        resp = requests.post(f"{base}/query", json={"prompt": user_text}, headers=headers, timeout=60)
         if resp.status_code == 404:  # fallback to /chat
             resp = requests.post(f"{base}/chat", json={"prompt": user_text}, headers=headers, timeout=60)
         resp.raise_for_status()
         js = resp.json()
-        return js.get("result") or js.get("answer") or js.get("message") or json.dumps(js)
+        # Handle all possible response keys
+        return js.get("result") or js.get("answer") or js.get("message") or js.get("content") or json.dumps(js)
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
@@ -68,17 +69,36 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
 st.markdown(f"""
 <style>
-  .stApp {{ background: white; }}
+  .stApp {{
+    background: linear-gradient(135deg, {PRIMARY}22, {ACCENT}22, #ffffff);
+    background-size: 400% 400%;
+    animation: gradientBG 15s ease infinite;
+  }}
+  section[data-testid="stSidebar"] {{
+    background: linear-gradient(135deg, {PRIMARY}33, {ACCENT}22, #fafafa);
+    background-size: 400% 400%;
+    animation: gradientBG 20s ease infinite;
+  }}
+  @keyframes gradientBG {{
+    0% {{background-position: 0% 50%;}}
+    50% {{background-position: 100% 50%;}}
+    100% {{background-position: 0% 50%;}}
+  }}
   .chat-bubble-user {{
     border-left: 4px solid {PRIMARY}; padding: 12px; margin: 8px 0;
     border-radius: 12px; background: #f5f9ff;
+    font-size: 18px; line-height: 1.5;
   }}
   .chat-bubble-bot {{
     border-left: 4px solid {ACCENT}; padding: 12px; margin: 8px 0;
     border-radius: 12px; background: #fff8f0;
+    font-size: 18px; line-height: 1.5;
   }}
-  .history-item {{ cursor:pointer; padding:8px; margin:4px 0;
-    border-radius:10px; border:1px solid #eee; }}
+  .history-item {{
+    cursor:pointer; padding:8px; margin:4px 0;
+    border-radius:10px; border:1px solid #eee;
+    font-size: 16px;
+  }}
   .history-item:hover {{ border-color: {PRIMARY}; background:#f9fbff; }}
   .title {{ font-size: 28px; font-weight: 700; color: {PRIMARY}; }}
 </style>
