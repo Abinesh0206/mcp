@@ -16,7 +16,7 @@
       "name": "argocd",
       "type": "http",
       "baseUrl": "http://a3b91fe99f4234745bb68bc642ba109c-843992339.us-east-1.elb.amazonaws.com:80",
-      "authHeader": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhcmdvY2QiLCJzdWIiOiJhZG1pbjphcGlLZXkiLCJuYmYiOjE3NTU4NDE4MTQsImlhdCI6MTc1NTg0MTgxNCwianRpIjoiNmY3NTYzNWEtODRiOS00Njk4LTkyYTgtYTM2Nzc3MmZkMzdhIn0.epVThLVTxGJ_PDvMSE1tdsh8flmKVSdTsvODij4vWoQ"
+      "authHeader": "Bearer "
     }
   ],
   "routing": [
