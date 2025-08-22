@@ -1,0 +1,16 @@
+{
+  "tools": [
+    {
+      "name": "list_namespaces",
+      "description": "Get all Kubernetes namespaces"
+    },
+    {
+      "name": "list_apps",
+      "description": "Get all ArgoCD applications"
+    },
+    {
+      "name": "list_pods",
+      "description": "Get all pods in a given namespace"
+    }
+  ]
+}
