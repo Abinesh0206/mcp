@@ -38,9 +38,6 @@ spec:
           volumeMounts:
             - name: code
               mountPath: /app
-            volumeMounts:
-            - name: code
-              mountPath: /app
           workingDir: /app
           command: ["/bin/sh","-c"]
           args:
