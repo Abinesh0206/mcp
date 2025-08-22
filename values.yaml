@@ -20,7 +20,7 @@ ui:
       cpu: "1"
       memory: "1Gi"
   env:
-    OLLAMA_BASE_URL: "http://ollama.masabot.svc.cluster.local:11434"
+    OLLAMA_BASE_URL: "http://ollama:11434"
     UI_TITLE: "MasaBot"
     THEME_PRIMARY: "#1e88e5" # blue
     THEME_ACCENT:  "#ff6f00" # orange
