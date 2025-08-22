@@ -3,7 +3,7 @@
     {
       "name": "kubernetes",
       "type": "http",
-      "baseUrl": "http://mcp-server.kube-server.svc.cluster.local:8000",
+      "baseUrl": "http://adc916266414849bb82d9e668ae442e4-498594891.us-east-1.elb.amazonaws.com:8000",
       "authHeader": "Bearer ${K8S_MCP_TOKEN}"
     },
     {
