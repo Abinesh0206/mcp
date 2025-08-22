@@ -55,5 +55,4 @@ spec:
                 path: requirements.txt
               - key: mcp_config.json
                 path: mcp_config.json
-              - key: mcp_tools.json
-                path: mcp_tools.json
+        
