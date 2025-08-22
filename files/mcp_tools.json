@@ -1,16 +1,26 @@
 {
+  "system_prompt": "You are MasaBot, a Kubernetes expert. Always answer with clear kubectl commands and explanations.",
+
   "tools": [
     {
       "name": "list_namespaces",
-      "description": "Get all Kubernetes namespaces"
+      "description": "Get all Kubernetes namespaces",
+      "prompt": "The user wants namespaces. Use: kubectl get ns"
     },
     {
-      "name": "list_apps",
-      "description": "Get all ArgoCD applications"
+      "name": "get_pods",
+      "description": "List pods in a namespace",
+      "prompt": "The user wants pods. Use: kubectl get pods -n <namespace>"
     },
     {
-      "name": "list_pods",
-      "description": "Get all pods in a given namespace"
+      "name": "describe_pod",
+      "description": "Describe a specific pod",
+      "prompt": "The user asks about pod details. Use: kubectl describe pod <pod-name> -n <namespace>"
+    },
+    {
+      "name": "get_logs",
+      "description": "Get logs from a pod",
+      "prompt": "The user wants pod logs. Use: kubectl logs <pod-name> -n <namespace>"
     }
   ]
 }
