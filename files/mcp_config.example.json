@@ -15,7 +15,7 @@
     {
       "name": "argocd",
       "type": "http",
-      "baseUrl": "http://a55f0243777eb496d88ee5a9cc83f734-1250118809.us-east-1.elb.amazonaws.com:8000",
+      "baseUrl": "http://a55f0243777eb496d88ee5a9cc83f734-1250118809.us-east-1.elb.amazonaws.com",
       "authHeader": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhcmdvY2QiLCJzdWIiOiJhZG1pbjphcGlLZXkiLCJuYmYiOjE3NTU4NDE4MTQsImlhdCI6MTc1NTg0MTgxNCwianRpIjoiNmY3NTYzNWEtODRiOS00Njk4LTkyYTgtYTM2Nzc3MmZkMzdhIn0.epVThLVTxGJ_PDvMSE1tdsh8flmKVSdTsvODij4vWoQ"
     }
   ],
