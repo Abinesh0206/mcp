@@ -12,25 +12,18 @@ CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
 
-# Load MCP tools config
-TOOLS_PATH = os.path.join(os.getcwd(), "mcp_tools.json")
-with open(TOOLS_PATH, "r") as f:
-    MCP_TOOLS = json.load(f)
-
-
-def mcp_route(tool_name: str):
-    """Pick MCP server by tool name regex mapping."""
+def mcp_route(user_text: str):
+    """Pick MCP server by regex routing rules."""
     for rule in MCP_CFG.get("routing", []):
-        if re.search(rule["matcher"], tool_name, flags=re.I):
+        if re.search(rule["matcher"], user_text, flags=re.I):
             name = rule["server"]
             for srv in MCP_CFG.get("servers", []):
                 if srv["name"] == name:
                     return srv
     return None
 
-
-def call_mcp_http(server, tool_name: str):
-    """Call MCP server with the tool name."""
+def call_mcp_http(server, user_text: str):
+    """Call MCP server. Supports /query or /chat automatically."""
     base = server["baseUrl"].rstrip("/")
     headers = {}
     authHeader = server.get("authHeader")
@@ -39,55 +32,38 @@ def call_mcp_http(server, tool_name: str):
         headers["Authorization"] = expanded
 
     try:
-        resp = requests.post(f"{base}/query", json={"prompt": tool_name}, headers=headers, timeout=60)
-        if resp.status_code == 404:
-            resp = requests.post(f"{base}/chat", json={"prompt": tool_name}, headers=headers, timeout=60)
+        # First try /query with correct key
+        resp = requests.post(f"{base}/query", json={"prompt": user_text}, headers=headers, timeout=60)
+        if resp.status_code == 404:  # fallback to /chat
+            resp = requests.post(f"{base}/chat", json={"prompt": user_text}, headers=headers, timeout=60)
         resp.raise_for_status()
         js = resp.json()
+        # Handle all possible response keys
         return js.get("result") or js.get("answer") or js.get("message") or js.get("content") or json.dumps(js)
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
-
-def call_ollama(prompt: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    """Call Ollama to generate text."""
+def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
+    """Call Ollama /api/generate with streaming support."""
     payload = {
         "model": model,
-        "prompt": f"{system or 'You are MasaBot, a helpful DevOps assistant.'}\n\n{prompt}",
-        "stream": False
-    }
-    r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json().get("response", "").strip()
-
-
-def translate_to_mcp(user_text: str):
-    """Use Ollama to translate natural language into MCP tool JSON."""
-    system_prompt = f"""
-You are a command translator for MCP.
-Available tools:
-{json.dumps(MCP_TOOLS, indent=2)}
-
-Rules:
-- Always return valid JSON with keys: "tool" and "args".
-- "args" can be empty if not needed.
-- Do not explain, just return JSON.
-    """
-
-    payload = {
-        "model": "mistral:7b-instruct-v0.2-q4_0",
-        "prompt": f"{system_prompt}\n\nUser: {user_text}\nAssistant:",
-        "stream": False
+        "prompt": f"{system or 'You are MasaBot, a helpful DevOps assistant.'}\n\nUser: {user_text}\nAssistant:",
+        "stream": True
     }
     try:
-        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=60)
+        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, stream=True, timeout=120)
         r.raise_for_status()
-        js = r.json()
-        raw = js.get("response", "{}").strip()
-        return json.loads(raw)
+        response_text = ""
+        for line in r.iter_lines():
+            if not line:
+                continue
+            js = json.loads(line.decode("utf-8"))
+            if js.get("done"):
+                break
+            response_text += js.get("response", "")
+        return response_text.strip()
     except Exception as e:
-        return {"error": str(e)}
-
+        return f"[Ollama] error: {e}"
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
@@ -118,6 +94,13 @@ st.markdown(f"""
     border-radius: 12px; background: #fff8f0;
     font-size: 18px; line-height: 1.5;
   }}
+  .history-item {{
+    cursor:pointer; padding:8px; margin:4px 0;
+    border-radius:10px; border:1px solid #eee;
+    font-size: 16px;
+  }}
+  .history-item:hover {{ border-color: {PRIMARY}; background:#f9fbff; }}
+  .title {{ font-size: 28px; font-weight: 700; color: {PRIMARY}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -125,6 +108,23 @@ if "sessions" not in st.session_state:
     st.session_state.sessions = []
 if "current" not in st.session_state:
     st.session_state.current = {"title": "New chat", "messages": []}
+
+with st.sidebar:
+    st.markdown(f"<div class='title'>🧠 {TITLE}</div>", unsafe_allow_html=True)
+    if st.button("➕ New chat"):
+        if st.session_state.current["messages"]:
+            st.session_state.sessions.append(st.session_state.current)
+        st.session_state.current = {"title": "New chat", "messages": []}
+    st.markdown("---")
+    st.subheader("History")
+    for i, s in enumerate(reversed(st.session_state.sessions)):
+        idx = len(st.session_state.sessions) - 1 - i
+        if st.button(s["title"] or f"Chat {idx+1}", key=f"hist-{idx}"):
+            st.session_state.sessions.append(st.session_state.current)
+            st.session_state.current = s
+            del st.session_state.sessions[idx]
+    st.markdown("---")
+    st.caption("Blue = you, Orange = MasaBot. MCP auto-routes by keywords (k8s/argo/jenkins).")
 
 st.markdown("### Start chatting")
 user_text = st.chat_input("Type your message…")
@@ -140,20 +140,13 @@ if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
 
-    with st.spinner("Thinking with Ollama…"):
-        translation = translate_to_mcp(user_text)
-
-    if "tool" in translation:
-        tool = translation["tool"]
-        args = translation.get("args", {})
-        target = mcp_route(tool)
-        if target:
-            with st.spinner(f"Calling MCP tool: {tool}"):
-                answer = call_mcp_http(target, tool)
-        else:
-            answer = f"⚠️ No MCP server found for tool: {tool}"
+    target = mcp_route(user_text)
+    if target:
+        with st.spinner(f"Querying MCP: {target['name']}"):
+            answer = call_mcp_http(target, user_text)
     else:
-        answer = call_ollama(user_text)
+        with st.spinner("Thinking with Ollama…"):
+            answer = call_ollama(user_text, model="mistral:7b-instruct-v0.2-q4_0")
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
