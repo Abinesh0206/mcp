@@ -38,6 +38,9 @@ spec:
           volumeMounts:
             - name: code
               mountPath: /app
+            - name: tools
+              mountPath: /app/mcp_tools.json
+              subPath: mcp_tools.json
           workingDir: /app
           command: ["/bin/sh","-c"]
           args:
@@ -55,3 +58,9 @@ spec:
                 path: requirements.txt
               - key: mcp_config.json
                 path: mcp_config.json
+        - name: tools
+          configMap:
+            name: masabot-tools
+            items:
+              - key: mcp_tools.json
+                path: mcp_tools.json
