@@ -105,18 +105,9 @@ st.markdown(f"""
     border-radius: 12px; background: #fff8f0;
     font-size: 18px; line-height: 1.5;
   }}
-  .history-item {{
-    cursor:pointer; padding:8px; margin:4px 0; border-radius:10px;
-    border:1px solid #eee; font-size: 16px;
-  }}
-  .history-item:hover {{
-    border-color: {PRIMARY}; background:#f9fbff;
-  }}
-  .title {{
-    font-size: 28px; font-weight: 700; color: {PRIMARY};
-  }}
 </style>
 """, unsafe_allow_html=True)
+
 # ----------------- Session State -----------------
 if "sessions" not in st.session_state:
     st.session_state.sessions = []
@@ -126,7 +117,10 @@ if "current" not in st.session_state:
 
 # ----------------- Sidebar -----------------
 with st.sidebar:
-    st.markdown(f"<div class='title'>🧠 {TITLE}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='font-size:28px; font-weight:700; color:{PRIMARY};'>🧠 {TITLE}</div>",
+        unsafe_allow_html=True
+    )
 
     if st.button("➕ New chat"):
         if st.session_state.current["messages"]:
@@ -142,9 +136,6 @@ with st.sidebar:
             st.session_state.sessions.append(st.session_state.current)
             st.session_state.current = s
             del st.session_state.sessions[idx]
-
-    st.markdown("---")
-    st.caption("Blue = you, Orange = MasaBot. MCP auto-routes by keywords (k8s/argo/jenkins).")
 
 # ----------------- Chat Window -----------------
 st.markdown("### Start chatting")
@@ -162,18 +153,26 @@ if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
 
-    target = mcp_route(user_text)
-    if target:
-        with st.spinner(f"Querying MCP: {target['name']}"):
-            answer = call_mcp_http(target, user_text)
-    else:
+    intent = classify_intent(user_text)
+
+    if intent == "chat":
         with st.spinner("Thinking with Ollama…"):
-            answer = call_ollama(user_text, model="mistral:7b-instruct-v0.2-q4_0")
+            answer = call_ollama(user_text)
+    else:
+        server = get_server_by_name(intent)
+        if server:
+            with st.spinner(f"Querying MCP: {server['name']}"):
+                answer = call_mcp_http(server, user_text)
+        else:
+            with st.spinner("Thinking with Ollama…"):
+                answer = call_ollama(user_text)
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
 
 # ----------------- Update Title -----------------
 if not st.session_state.current.get("title") and msgs:
-    first_msg = msgs[0]["content"]
-    st.session_state.current["title"] = (first_msg[:30] + "…") if len(first_msg) > 30 else first_msg
+    st.session_state.current["title"] = (
+        msgs[0]["content"][:30] + "…"
+        if len(msgs[0]["content"]) > 30 else msgs[0]["content"]
+    )
