@@ -77,7 +77,6 @@ def get_server_by_name(name: str):
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
-
 st.markdown(f"""
 <style>
   .stApp {{
@@ -96,48 +95,31 @@ st.markdown(f"""
     100% {{background-position: 0% 50%;}}
   }}
   .chat-bubble-user {{
-    border-left: 4px solid {PRIMARY}; 
-    padding: 12px; 
-    margin: 8px 0;
-    border-radius: 12px; 
-    background: #f5f9ff;
-    font-size: 18px; 
-    line-height: 1.5;
+    border-left: 4px solid {PRIMARY}; padding: 12px; margin: 8px 0;
+    border-radius: 12px; background: #f5f9ff;
+    font-size: 18px; line-height: 1.5;
   }}
   .chat-bubble-bot {{
-    border-left: 4px solid {ACCENT}; 
-    padding: 12px; 
-    margin: 8px 0;
-    border-radius: 12px; 
-    background: #fff8f0;
-    font-size: 18px; 
-    line-height: 1.5;
+    border-left: 4px solid {ACCENT}; padding: 12px; margin: 8px 0;
+    border-radius: 12px; background: #fff8f0;
+    font-size: 18px; line-height: 1.5;
   }}
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------- Session State -----------------
 if "sessions" not in st.session_state:
     st.session_state.sessions = []
-
 if "current" not in st.session_state:
     st.session_state.current = {"title": "New chat", "messages": []}
 
-# ----------------- Sidebar -----------------
 with st.sidebar:
-    st.markdown(
-        f"<div style='font-size:28px; font-weight:700; color:{PRIMARY};'>🧠 {TITLE}</div>",
-        unsafe_allow_html=True
-    )
-
+    st.markdown(f"<div style='font-size:28px; font-weight:700; color:{PRIMARY};'>🧠 {TITLE}</div>", unsafe_allow_html=True)
     if st.button("➕ New chat"):
         if st.session_state.current["messages"]:
             st.session_state.sessions.append(st.session_state.current)
         st.session_state.current = {"title": "New chat", "messages": []}
-
     st.markdown("---")
     st.subheader("History")
-
     for i, s in enumerate(reversed(st.session_state.sessions)):
         idx = len(st.session_state.sessions) - 1 - i
         if st.button(s["title"] or f"Chat {idx+1}", key=f"hist-{idx}"):
@@ -145,7 +127,6 @@ with st.sidebar:
             st.session_state.current = s
             del st.session_state.sessions[idx]
 
-# ----------------- Chat Window -----------------
 st.markdown("### Start chatting")
 user_text = st.chat_input("Type your message…")
 msgs = st.session_state.current["messages"]
@@ -156,7 +137,6 @@ for m in msgs:
     else:
         st.markdown(f"<div class='chat-bubble-bot'>{m['content']}</div>", unsafe_allow_html=True)
 
-# ----------------- Handle Input -----------------
 if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
@@ -178,6 +158,7 @@ if user_text:
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
 
-# ----------------- Update Title -----------------
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
+
+
