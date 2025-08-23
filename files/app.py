@@ -50,13 +50,18 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
         return f"[Ollama] error: {e}"
 
 def classify_intent(user_text: str):
-    """Classifier always returns 'chat' or a server name."""
+    """Classifier ensures general questions always go to chat."""
+    # Simple keyword based override for general Qs
+    general_markers = ["what is", "explain", "definition", "overview", "tutorial"]
+    if any(marker in user_text.lower() for marker in general_markers):
+        return "chat"
+
     system = f"""
 You are an intent classifier for a DevOps bot.
 
-Answer with exactly ONE word:
-- 'chat' → if the user wants a general explanation/definition/tutorial (e.g. "what is kubernetes", "explain jenkins").
-- OR one of these MCP servers if the user clearly asks about live system/apps/pipelines: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
+Return only one word:
+- 'chat' → if the user asks for explanations, concepts, or general understanding.
+- OR one of these MCP servers if the user clearly requests live system data/actions: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
 
 Examples:
 Q: what is kubernetes → chat
@@ -67,7 +72,7 @@ Q: trigger build in jenkins → jenkins
     """
     resp = call_ollama(user_text, system=system)
     intent = resp.strip().lower()
-    if not intent:
+    if not intent or intent not in ["chat"] + [srv["name"].lower() for srv in MCP_CFG.get("servers", [])]:
         return "chat"
     return intent
 
