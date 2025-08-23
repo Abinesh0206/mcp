@@ -80,53 +80,40 @@ st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
 
 st.markdown(f"""
 <style>
-  /* Dark Gradient Background */
   .stApp {{
-    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    background: linear-gradient(135deg, {PRIMARY}22, {ACCENT}22, #ffffff);
     background-size: 400% 400%;
     animation: gradientBG 15s ease infinite;
-    color: #f0f0f0 !important;
   }}
   section[data-testid="stSidebar"] {{
-    background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
+    background: linear-gradient(135deg, {PRIMARY}33, {ACCENT}22, #fafafa);
     background-size: 400% 400%;
     animation: gradientBG 20s ease infinite;
-    color: #fff !important;
   }}
   @keyframes gradientBG {{
     0% {{background-position: 0% 50%;}}
     50% {{background-position: 100% 50%;}}
     100% {{background-position: 0% 50%;}}
   }}
-
-  /* Chat bubbles */
   .chat-bubble-user {{
-    border-left: 4px solid #6a5acd;
-    padding: 12px;
-    margin: 8px 0;
-    border-radius: 12px;
-    background: rgba(106, 90, 205, 0.15);
-    font-size: 18px;
-    line-height: 1.5;
-    color: #e0e0ff;
+    border-left: 4px solid {PRIMARY}; padding: 12px; margin: 8px 0;
+    border-radius: 12px; background: #f5f9ff;
+    font-size: 18px; line-height: 1.5;
   }}
   .chat-bubble-bot {{
-    border-left: 4px solid #00bfff;
-    padding: 12px;
-    margin: 8px 0;
-    border-radius: 12px;
-    background: rgba(0, 191, 255, 0.12);
-    font-size: 18px;
-    line-height: 1.5;
-    color: #d0f0ff;
+    border-left: 4px solid {ACCENT}; padding: 12px; margin: 8px 0;
+    border-radius: 12px; background: #fff8f0;
+    font-size: 18px; line-height: 1.5;
   }}
-
-  /* Sidebar title */
-  .sidebar-title {{
-    font-size: 28px;
-    font-weight: 700;
-    color: #7b68ee;
-    text-shadow: 0 0 10px rgba(123,104,238,0.8);
+  .history-item {{
+    cursor:pointer; padding:8px; margin:4px 0; border-radius:10px;
+    border:1px solid #eee; font-size: 16px;
+  }}
+  .history-item:hover {{
+    border-color: {PRIMARY}; background:#f9fbff;
+  }}
+  .title {{
+    font-size: 28px; font-weight: 700; color: {PRIMARY};
   }}
 </style>
 """, unsafe_allow_html=True)
