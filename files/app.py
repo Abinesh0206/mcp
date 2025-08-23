@@ -7,21 +7,17 @@ TITLE = os.getenv("UI_TITLE", "MasaBot")
 PRIMARY = os.getenv("THEME_PRIMARY", "#1e88e5")
 ACCENT = os.getenv("THEME_ACCENT", "#ff6f00")
 
-# Load MCP routing config (all MCP servers must be defined here)
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
 
-
 # ---------- Helpers ----------
 def call_mcp_http(server, user_text: str):
-    """Call MCP server (supports /query and /chat)."""
     base = server["baseUrl"].rstrip("/")
     headers = {}
     if server.get("authHeader"):
         expanded = re.sub(r"\$\{([^}]+)\}", lambda m: os.getenv(m.group(1), ""), server["authHeader"])
         headers["Authorization"] = expanded
-
     try:
         resp = requests.post(f"{base}/query", json={"prompt": user_text}, headers=headers, timeout=60)
         if resp.status_code == 404:
@@ -32,9 +28,7 @@ def call_mcp_http(server, user_text: str):
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
-
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    """Call Ollama /api/generate (streaming)."""
     payload = {
         "model": model,
         "prompt": f"{system or 'You are MasaBot, a helpful DevOps assistant.'}\n\nUser: {user_text}\nAssistant:",
@@ -55,36 +49,33 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
     except Exception as e:
         return f"[Ollama] error: {e}"
 
-
 def classify_intent(user_text: str):
-    """Ask Ollama if it's a general explanation (chat) or MCP query."""
+    """Classifier always returns 'chat' or a server name."""
     system = f"""
-You are an intent classifier for DevOps assistant.
+You are an intent classifier for a DevOps bot.
 
-Decide between:
-- 'chat' → if the user is asking for a general explanation, definition, tutorial, or concept 
-  (e.g. "what is kubernetes", "explain jenkins").
-- OR one of these MCP servers if the user clearly wants live data/actions: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
+Answer with exactly ONE word:
+- 'chat' → if the user wants a general explanation/definition/tutorial (e.g. "what is kubernetes", "explain jenkins").
+- OR one of these MCP servers if the user clearly asks about live system/apps/pipelines: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
 
 Examples:
 Q: what is kubernetes → chat
 Q: explain jenkins → chat
-Q: list namespaces in cluster → k8s
-Q: how many apps running in argocd → argo
+Q: list namespaces → k8s
+Q: how many apps in argocd → argo
 Q: trigger build in jenkins → jenkins
-
-Return only one word.
     """
-    resp = call_ollama(user_text, system=system, model="mistral:7b-instruct-v0.2-q4_0")
-    return resp.strip().lower()
-
+    resp = call_ollama(user_text, system=system)
+    intent = resp.strip().lower()
+    if not intent:
+        return "chat"
+    return intent
 
 def get_server_by_name(name: str):
     for srv in MCP_CFG.get("servers", []):
         if srv["name"].lower() == name:
             return srv
     return None
-
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
@@ -152,19 +143,19 @@ if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
 
-    # Step 1: Ollama classifies intent
     intent = classify_intent(user_text)
 
     if intent == "chat":
         with st.spinner("Thinking with Ollama…"):
-            answer = call_ollama(user_text, model="mistral:7b-instruct-v0.2-q4_0")
+            answer = call_ollama(user_text)
     else:
         server = get_server_by_name(intent)
         if server:
             with st.spinner(f"Querying MCP: {server['name']}"):
                 answer = call_mcp_http(server, user_text)
         else:
-            answer = call_ollama(user_text, model="mistral:7b-instruct-v0.2-q4_0")
+            with st.spinner("Thinking with Ollama…"):
+                answer = call_ollama(user_text)
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
