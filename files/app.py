@@ -7,7 +7,7 @@ TITLE = os.getenv("UI_TITLE", "MasaBot")
 PRIMARY = os.getenv("THEME_PRIMARY", "#1e88e5")
 ACCENT = os.getenv("THEME_ACCENT", "#ff6f00")
 
-# Load MCP routing config (define all MCP servers in mcp_config.json)
+# Load MCP routing config (all MCP servers must be defined here)
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
@@ -57,16 +57,24 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
 
 
 def classify_intent(user_text: str):
-    """Ask Ollama: general chat or which MCP server?"""
-    system = """
-You are an intent classifier.
-Decide if the user wants:
-- 'chat' → general explanation (no live query)
-- Or which MCP server (pick from config): return one server name from this list: 
-{}
-If you cannot match, return 'chat'.
+    """Ask Ollama if it's a general explanation (chat) or MCP query."""
+    system = f"""
+You are an intent classifier for DevOps assistant.
+
+Decide between:
+- 'chat' → if the user is asking for a general explanation, definition, tutorial, or concept 
+  (e.g. "what is kubernetes", "explain jenkins").
+- OR one of these MCP servers if the user clearly wants live data/actions: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
+
+Examples:
+Q: what is kubernetes → chat
+Q: explain jenkins → chat
+Q: list namespaces in cluster → k8s
+Q: how many apps running in argocd → argo
+Q: trigger build in jenkins → jenkins
+
 Return only one word.
-""".format(", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])]))
+    """
     resp = call_ollama(user_text, system=system, model="mistral:7b-instruct-v0.2-q4_0")
     return resp.strip().lower()
 
