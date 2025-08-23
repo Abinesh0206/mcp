@@ -50,31 +50,24 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
         return f"[Ollama] error: {e}"
 
 def classify_intent(user_text: str):
-    """Classifier ensures general questions always go to chat."""
-    # Simple keyword based override for general Qs
-    general_markers = ["what is", "explain", "definition", "overview", "tutorial"]
-    if any(marker in user_text.lower() for marker in general_markers):
+    """Better classifier: general vs live query."""
+    txt = user_text.lower().strip()
+
+    # Always chat for general/explanatory
+    if re.search(r"\b(what is|explain|definition|overview|tutorial|guide|how to|deploy|install)\b", txt):
         return "chat"
 
-    system = f"""
-You are an intent classifier for a DevOps bot.
+    # Live query keywords
+    if re.search(r"\b(list|show|get|status|apps?|pods?|pipelines?|build|trigger|jobs?)\b", txt):
+        if "argo" in txt or "argocd" in txt:
+            return "argo"
+        if "jenkins" in txt:
+            return "jenkins"
+        if "k8s" in txt or "kubernetes" in txt or "cluster" in txt or "pod" in txt or "namespace" in txt:
+            return "k8s"
 
-Return only one word:
-- 'chat' → if the user asks for explanations, concepts, or general understanding.
-- OR one of these MCP servers if the user clearly requests live system data/actions: {", ".join([srv["name"] for srv in MCP_CFG.get("servers", [])])}
-
-Examples:
-Q: what is kubernetes → chat
-Q: explain jenkins → chat
-Q: list namespaces → k8s
-Q: how many apps in argocd → argo
-Q: trigger build in jenkins → jenkins
-    """
-    resp = call_ollama(user_text, system=system)
-    intent = resp.strip().lower()
-    if not intent or intent not in ["chat"] + [srv["name"].lower() for srv in MCP_CFG.get("servers", [])]:
-        return "chat"
-    return intent
+    # fallback
+    return "chat"
 
 def get_server_by_name(name: str):
     for srv in MCP_CFG.get("servers", []):
