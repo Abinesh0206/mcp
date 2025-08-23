@@ -96,14 +96,22 @@ st.markdown(f"""
     100% {{background-position: 0% 50%;}}
   }}
   .chat-bubble-user {{
-    border-left: 4px solid {PRIMARY}; padding: 12px; margin: 8px 0;
-    border-radius: 12px; background: #f5f9ff;
-    font-size: 18px; line-height: 1.5;
+    border-left: 4px solid {PRIMARY}; 
+    padding: 12px; 
+    margin: 8px 0;
+    border-radius: 12px; 
+    background: #f5f9ff;
+    font-size: 18px; 
+    line-height: 1.5;
   }}
   .chat-bubble-bot {{
-    border-left: 4px solid {ACCENT}; padding: 12px; margin: 8px 0;
-    border-radius: 12px; background: #fff8f0;
-    font-size: 18px; line-height: 1.5;
+    border-left: 4px solid {ACCENT}; 
+    padding: 12px; 
+    margin: 8px 0;
+    border-radius: 12px; 
+    background: #fff8f0;
+    font-size: 18px; 
+    line-height: 1.5;
   }}
 </style>
 """, unsafe_allow_html=True)
@@ -172,7 +180,4 @@ if user_text:
 
 # ----------------- Update Title -----------------
 if not st.session_state.current.get("title") and msgs:
-    st.session_state.current["title"] = (
-        msgs[0]["content"][:30] + "…"
-        if len(msgs[0]["content"]) > 30 else msgs[0]["content"]
-    )
+    st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
