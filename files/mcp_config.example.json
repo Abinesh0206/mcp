@@ -15,7 +15,7 @@
     {
       "name": "argocd",
       "type": "http",
-      "baseUrl": "http://a3b91fe99f4234745bb68bc642ba109c-843992339.us-east-1.elb.amazonaws.com:80",
+      "baseUrl": "https://a3b91fe99f4234745bb68bc642ba109c-843992339.us-east-1.elb.amazonaws.com:80",
       "authHeader": "Bearer ${ARGOCD_MCP_TOKEN}"
     }
   ],
