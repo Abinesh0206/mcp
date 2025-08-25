@@ -3,7 +3,7 @@
     {
       "name": "kubernetes",
       "type": "http",
-      "baseUrl": "http://adc916266414849bb82d9e668ae442e4-498594891.us-east-1.elb.amazonaws.com:8000",
+      "baseUrl": "http://localhost:8000",
       "authHeader": "Bearer ${K8S_MCP_TOKEN}"
     },
     {
@@ -15,13 +15,13 @@
     {
       "name": "argocd",
       "type": "http",
-      "baseUrl": "https://a3b91fe99f4234745bb68bc642ba109c-843992339.us-east-1.elb.amazonaws.com:80",
+      "baseUrl": "http://a3b91fe99f4234745bb68bc642ba109c-843992339.us-east-1.elb.amazonaws.com",
       "authHeader": "Bearer ${ARGOCD_MCP_TOKEN}"
     }
   ],
   "routing": [
     { "matcher": "deploy|sync|rollback|argo", "server": "argocd" },
-    { "matcher": "pod|logs|cluster|k8s|namespace|node", "server": "kubernetes" },
-    { "matcher": "build|job|pipeline|jenkins", "server": "jenkins" }
+    { "matcher": "pod|pods|log|logs|cluster|k8s|namespace|namespaces|node|nodes", "server": "kubernetes" },
+    { "matcher": "build|job|jobs|pipeline|jenkins", "server": "jenkins" }
   ]
 }
