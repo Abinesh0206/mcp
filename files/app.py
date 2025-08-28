@@ -29,23 +29,37 @@ def call_mcp_http(server, query: str):
         return f"[MCP:{server['name']}] error: {e}"
 
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    payload = {
-        "model": model,
-        "prompt": f"""{system or "You are MasaBot, a DevOps AI assistant."}
+    # ---------- UPDATED SYSTEM MESSAGE ----------
+    system_prompt = f"""{system or "You are MasaBot, a DevOps AI assistant."}
 
 User may ask two types of questions:
 1. General/explanatory → answer directly in plain text.
 2. Live/system query (Kubernetes, ArgoCD, Jenkins) → DO NOT answer directly. Instead, respond ONLY in JSON like this:
-   {{ "target": "kubernetes", "query": "get pods in all namespaces" }}
-   or
+   {{ "target": "kubernetes", "query": "get namespaces" }}
+   {{ "target": "kubernetes", "query": "list-pods" }}
+   {{ "target": "kubernetes", "query": "list-services" }}
+   {{ "target": "kubernetes", "query": "list-deployments" }}
+   {{ "target": "kubernetes", "query": "create-namespace test-ns" }}
+   {{ "target": "kubernetes", "query": "create-secret my-secret -n abinesh" }}
    {{ "target": "jenkins", "query": "list all jobs" }}
-   or
    {{ "target": "argocd", "query": "sync app myapp" }}
 
 ⚠️ Allowed targets = ["kubernetes", "argocd", "jenkins"]
 
+👉 Mapping rules for Kubernetes:
+- "show all namespaces" → "get namespaces"
+- "show all pods" or "list pods" → "list-pods"
+- "show all services" → "list-services"
+- "show all deployments" → "list-deployments"
+- "create namespace XYZ" → "create-namespace XYZ"
+- "create secret for NAMESPACE" → "create-secret my-secret -n NAMESPACE"
+
 User: {user_text}
-Assistant:""",
+Assistant:"""
+
+    payload = {
+        "model": model,
+        "prompt": system_prompt,
         "stream": False
     }
     try:
@@ -136,3 +150,4 @@ if user_text:
 
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
+
