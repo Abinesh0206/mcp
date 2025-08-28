@@ -36,9 +36,13 @@ def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_
 User may ask two types of questions:
 1. General/explanatory → answer directly in plain text.
 2. Live/system query (Kubernetes, ArgoCD, Jenkins) → DO NOT answer directly. Instead, respond ONLY in JSON like this:
-   {{ "target": "k8s", "query": "get pods in all namespaces" }}
+   {{ "target": "kubernetes", "query": "get pods in all namespaces" }}
    or
    {{ "target": "jenkins", "query": "list all jobs" }}
+   or
+   {{ "target": "argocd", "query": "sync app myapp" }}
+
+⚠️ Allowed targets = ["kubernetes", "argocd", "jenkins"]
 
 User: {user_text}
 Assistant:""",
@@ -53,6 +57,17 @@ Assistant:""",
         return f"[Ollama] error: {e}"
 
 def get_server_by_name(name: str):
+    # ---------- Alias mapping ----------
+    aliases = {
+        "k8s": "kubernetes",
+        "kube": "kubernetes",
+        "argo": "argocd",
+        "cd": "argocd",
+        "jenk": "jenkins"
+    }
+    # normalize name
+    name = aliases.get(name.lower(), name.lower())
+
     for srv in MCP_CFG.get("servers", []):
         if srv["name"].lower() == name:
             return srv
