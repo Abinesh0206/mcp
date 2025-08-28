@@ -29,30 +29,41 @@ def call_mcp_http(server, query: str):
         return f"[MCP:{server['name']}] error: {e}"
 
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    # ---------- UPDATED SYSTEM MESSAGE ----------
+    # ---------- UPDATED + STRICT SYSTEM PROMPT ----------
     system_prompt = f"""{system or "You are MasaBot, a DevOps AI assistant."}
 
-User may ask two types of questions:
+User may ask two types of queries:
 1. General/explanatory → answer directly in plain text.
-2. Live/system query (Kubernetes, ArgoCD, Jenkins) → DO NOT answer directly. Instead, respond ONLY in JSON like this:
-   {{ "target": "kubernetes", "query": "get namespaces" }}
-   {{ "target": "kubernetes", "query": "list-pods" }}
-   {{ "target": "kubernetes", "query": "list-services" }}
-   {{ "target": "kubernetes", "query": "list-deployments" }}
-   {{ "target": "kubernetes", "query": "create-namespace test-ns" }}
-   {{ "target": "kubernetes", "query": "create-secret my-secret -n abinesh" }}
-   {{ "target": "jenkins", "query": "list all jobs" }}
-   {{ "target": "argocd", "query": "sync app myapp" }}
+2. Live/system query (Kubernetes, ArgoCD, Jenkins) → DO NOT answer in text. 
+   Instead respond ONLY in JSON:
+   {{
+      "target": "<kubernetes|argocd|jenkins>",
+      "query": "<mapped command>"
+   }}
 
 ⚠️ Allowed targets = ["kubernetes", "argocd", "jenkins"]
 
-👉 Mapping rules for Kubernetes:
+👉 Kubernetes mapping rules:
 - "show all namespaces" → "get namespaces"
-- "show all pods" or "list pods" → "list-pods"
+- "show all pods" → "list-pods"
+- "show pods in NAMESPACE" → "list-pods -n NAMESPACE"
 - "show all services" → "list-services"
 - "show all deployments" → "list-deployments"
 - "create namespace XYZ" → "create-namespace XYZ"
 - "create secret for NAMESPACE" → "create-secret my-secret -n NAMESPACE"
+- "create secret NAME in NAMESPACE" → "create-secret NAME -n NAMESPACE"
+
+👉 ArgoCD mapping rules:
+- "sync app APPNAME" → "sync app APPNAME"
+- "list apps" → "list apps"
+
+👉 Jenkins mapping rules:
+- "list all jobs" → "list all jobs"
+- "build job JOBNAME" → "build JOBNAME"
+
+❌ Do not guess extra text. 
+❌ Do not return natural language.
+✅ Always return strict JSON with target + query.
 
 User: {user_text}
 Assistant:"""
@@ -79,9 +90,7 @@ def get_server_by_name(name: str):
         "cd": "argocd",
         "jenk": "jenkins"
     }
-    # normalize name
     name = aliases.get(name.lower(), name.lower())
-
     for srv in MCP_CFG.get("servers", []):
         if srv["name"].lower() == name:
             return srv
@@ -142,7 +151,6 @@ if user_text:
         else:
             answer = ollama_answer
     except Exception:
-        # Normal text response
         answer = ollama_answer
 
     msgs.append({"role": "assistant", "content": answer})
@@ -150,4 +158,3 @@ if user_text:
 
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
-
