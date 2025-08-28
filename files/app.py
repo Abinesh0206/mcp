@@ -45,10 +45,15 @@ User may ask two types of queries:
 
 👉 Kubernetes mapping rules:
 - "show all namespaces" → "get namespaces"
+- "how many namespaces" → "count-namespaces"
 - "show all pods" → "list-pods"
+- "how many pods" / "number of pods" → "count-pods"
 - "show pods in NAMESPACE" → "list-pods -n NAMESPACE"
+- "how many pods in NAMESPACE" → "count-pods -n NAMESPACE"
 - "show all services" → "list-services"
+- "how many services" → "count-services"
 - "show all deployments" → "list-deployments"
+- "how many deployments" → "count-deployments"
 - "create namespace XYZ" → "create-namespace XYZ"
 - "create secret for NAMESPACE" → "create-secret my-secret -n NAMESPACE"
 - "create secret NAME in NAMESPACE" → "create-secret NAME -n NAMESPACE"
