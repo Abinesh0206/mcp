@@ -10,7 +10,6 @@ PRIMARY = "#1e88e5"
 ACCENT = "#ff6f00"
 
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
-HISTORY_PATH = "/tmp/chat_history.json"   # ✅ writable location
 
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
@@ -74,23 +73,6 @@ def get_server_by_name(name: str):
             return srv
     return None
 
-# ---------- Persistence Helpers ----------
-def load_history():
-    if os.path.exists(HISTORY_PATH):
-        try:
-            with open(HISTORY_PATH, "r") as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-def save_history(sessions):
-    try:
-        with open(HISTORY_PATH, "w") as f:
-            json.dump(sessions, f, indent=2)
-    except Exception as e:
-        st.warning(f"⚠ Could not save history: {e}")
-
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
 
@@ -109,8 +91,6 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-if "sessions" not in st.session_state:
-    st.session_state.sessions = load_history()
 if "current" not in st.session_state:
     st.session_state.current = {"title": "New chat", "messages": []}
 
@@ -118,7 +98,7 @@ st.markdown("### Start chatting")
 user_text = st.chat_input("Type your message…")
 msgs = st.session_state.current["messages"]
 
-# render chat history
+# render chat history (this session only)
 for m in msgs:
     if m["role"] == "user":
         st.markdown(f"<div class='chat-bubble-user'>{m['content']}</div>", unsafe_allow_html=True)
@@ -150,10 +130,6 @@ if user_text:
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
-
-    # save session history
-    st.session_state.sessions.append(st.session_state.current)
-    save_history(st.session_state.sessions)
 
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
