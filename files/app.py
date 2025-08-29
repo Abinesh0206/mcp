@@ -73,6 +73,24 @@ def get_server_by_name(name: str):
             return srv
     return None
 
+# ---------- Mapper (fix) ----------
+def normalize_query(parsed: dict) -> str:
+    """Map kubectl-like commands to server tool names"""
+    q = parsed.get("query", "").lower()
+
+    if "get pods" in q:
+        return "list_pods"
+    if "get namespaces" in q:
+        return "list_namespaces"
+    if "get services" in q:
+        return "list_services"
+    if "get deployments" in q:
+        return "list_deployments"
+    if "create namespace" in q:
+        return "create_namespace " + q.split()[-1]
+
+    return q  # fallback
+
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
 
@@ -119,8 +137,9 @@ if user_text:
         if isinstance(parsed, dict) and "target" in parsed and "query" in parsed:
             server = get_server_by_name(parsed["target"])
             if server:
-                with st.spinner(f"Querying MCP: {parsed['target']}"):
-                    mcp_result = call_mcp_http(server, parsed["query"])
+                norm_query = normalize_query(parsed)
+                with st.spinner(f"Querying MCP: {parsed['target']} → {norm_query}"):
+                    mcp_result = call_mcp_http(server, norm_query)
                 answer = f"From MCP:{parsed['target']} → {mcp_result}"
             else:
                 answer = f"[Error] No MCP server found for: {parsed['target']}"
