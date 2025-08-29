@@ -13,6 +13,7 @@ with open(CONFIG_PATH, "r") as f:
 
 # ---------- Helpers ----------
 def call_mcp_http(server, query: str):
+    """Call MCP server and return result, filtering out crashing pods."""
     base = server["baseUrl"].rstrip("/")
     headers = {}
     if server.get("authHeader"):
@@ -24,12 +25,18 @@ def call_mcp_http(server, query: str):
             resp = requests.post(f"{base}/chat", json={"prompt": query}, headers=headers, timeout=60)
         resp.raise_for_status()
         js = resp.json()
+
+        # Filter pods if present
+        if "pods" in js:
+            filtered = [p for p in js["pods"] if not any(s in p.lower() for s in ["crashloop", "evicted"])]
+            js["pods"] = filtered
+            js["count"] = len(filtered)
         return js.get("result") or js.get("answer") or js.get("message") or js.get("content") or json.dumps(js)
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
 def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    # ---------- UPDATED + STRICT SYSTEM PROMPT ----------
+    """Call Ollama with updated strict system prompt."""
     system_prompt = f"""{system or "You are MasaBot, a DevOps AI assistant."}
 
 User may ask two types of queries:
@@ -43,20 +50,14 @@ User may ask two types of queries:
 
 ⚠️ Allowed targets = ["kubernetes", "argocd", "jenkins"]
 
-👉 Kubernetes mapping rules:
+👉 Kubernetes mapping rules (auto namespace detection):
 - "show all namespaces" → "get namespaces"
 - "how many namespaces" → "count-namespaces"
 - "show all pods" → "list-pods"
 - "how many pods" / "number of pods" → "count-pods"
 - "show pods in NAMESPACE" → "list-pods -n NAMESPACE"
 - "how many pods in NAMESPACE" → "count-pods -n NAMESPACE"
-- "show all services" → "list-services"
-- "how many services" → "count-services"
-- "show all deployments" → "list-deployments"
-- "how many deployments" → "count-deployments"
-- "create namespace XYZ" → "create-namespace XYZ"
-- "create secret for NAMESPACE" → "create-secret my-secret -n NAMESPACE"
-- "create secret NAME in NAMESPACE" → "create-secret NAME -n NAMESPACE"
+- Only return pods in Running state (exclude CrashLoopBackOff / Evicted)
 
 👉 ArgoCD mapping rules:
 - "sync app APPNAME" → "sync app APPNAME"
@@ -87,7 +88,6 @@ Assistant:"""
         return f"[Ollama] error: {e}"
 
 def get_server_by_name(name: str):
-    # ---------- Alias mapping ----------
     aliases = {
         "k8s": "kubernetes",
         "kube": "kubernetes",
@@ -142,7 +142,7 @@ if user_text:
     with st.spinner("Ollama thinking…"):
         ollama_answer = call_ollama(user_text)
 
-    # Try parse as JSON → means MCP request
+    # Parse as JSON → MCP request
     try:
         parsed = json.loads(ollama_answer)
         if isinstance(parsed, dict) and "target" in parsed and "query" in parsed:
