@@ -91,6 +91,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
+# keep only in session_state (RAM)
 if "current" not in st.session_state:
     st.session_state.current = {"title": "New chat", "messages": []}
 
