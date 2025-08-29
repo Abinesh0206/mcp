@@ -10,7 +10,7 @@ PRIMARY = "#1e88e5"
 ACCENT = "#ff6f00"
 
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
-HISTORY_PATH = os.path.join(os.getcwd(), "chat_history.json")
+HISTORY_PATH = "/tmp/chat_history.json"   # ✅ writable location
 
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
@@ -77,13 +77,19 @@ def get_server_by_name(name: str):
 # ---------- Persistence Helpers ----------
 def load_history():
     if os.path.exists(HISTORY_PATH):
-        with open(HISTORY_PATH, "r") as f:
-            return json.load(f)
+        try:
+            with open(HISTORY_PATH, "r") as f:
+                return json.load(f)
+        except:
+            return []
     return []
 
 def save_history(sessions):
-    with open(HISTORY_PATH, "w") as f:
-        json.dump(sessions, f, indent=2)
+    try:
+        with open(HISTORY_PATH, "w") as f:
+            json.dump(sessions, f, indent=2)
+    except Exception as e:
+        st.warning(f"⚠ Could not save history: {e}")
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
