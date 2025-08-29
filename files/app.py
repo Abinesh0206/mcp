@@ -2,8 +2,7 @@ import os, json, re, requests
 import streamlit as st
 
 # ---------- Config ----------
-# ⚠ Hardcoded key (only for local testing!)
-GEMINI_API_KEY = "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk"
+GEMINI_API_KEY = "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk"  # ⚠ local only
 GEMINI_MODEL = "gemini-1.5-flash"
 
 TITLE = "MasaBot"
@@ -11,6 +10,8 @@ PRIMARY = "#1e88e5"
 ACCENT = "#ff6f00"
 
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
+HISTORY_PATH = os.path.join(os.getcwd(), "chat_history.json")
+
 with open(CONFIG_PATH, "r") as f:
     MCP_CFG = json.load(f)
 
@@ -42,30 +43,6 @@ User may ask two types of queries:
       "target": "<kubernetes|argocd|jenkins>",
       "query": "<mapped command>"
    }}
-
-⚠ Allowed targets = ["kubernetes", "argocd", "jenkins"]
-
-👉 Kubernetes mapping rules:
-- "show all namespaces" → "get namespaces"
-- "show all pods" → "list-pods"
-- "show pods in NAMESPACE" → "list-pods -n NAMESPACE"
-- "show all services" → "list-services"
-- "show all deployments" → "list-deployments"
-- "create namespace XYZ" → "create-namespace XYZ"
-- "create secret for NAMESPACE" → "create-secret my-secret -n NAMESPACE"
-- "create secret NAME in NAMESPACE" → "create-secret NAME -n NAMESPACE"
-
-👉 ArgoCD mapping rules:
-- "sync app APPNAME" → "sync app APPNAME"
-- "list apps" → "list apps"
-
-👉 Jenkins mapping rules:
-- "list all jobs" → "list all jobs"
-- "build job JOBNAME" → "build JOBNAME"
-
-❌ Do not guess extra text. 
-❌ Do not return natural language.
-✅ Always return strict JSON with target + query.
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
@@ -90,18 +67,23 @@ User may ask two types of queries:
         return f"[Gemini] error: {e}"
 
 def get_server_by_name(name: str):
-    aliases = {
-        "k8s": "kubernetes",
-        "kube": "kubernetes",
-        "argo": "argocd",
-        "cd": "argocd",
-        "jenk": "jenkins"
-    }
+    aliases = {"k8s": "kubernetes", "kube": "kubernetes", "argo": "argocd", "cd": "argocd", "jenk": "jenkins"}
     name = aliases.get(name.lower(), name.lower())
     for srv in MCP_CFG.get("servers", []):
         if srv["name"].lower() == name:
             return srv
     return None
+
+# ---------- Persistence Helpers ----------
+def load_history():
+    if os.path.exists(HISTORY_PATH):
+        with open(HISTORY_PATH, "r") as f:
+            return json.load(f)
+    return []
+
+def save_history(sessions):
+    with open(HISTORY_PATH, "w") as f:
+        json.dump(sessions, f, indent=2)
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
@@ -122,7 +104,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if "sessions" not in st.session_state:
-    st.session_state.sessions = []
+    st.session_state.sessions = load_history()
 if "current" not in st.session_state:
     st.session_state.current = {"title": "New chat", "messages": []}
 
@@ -137,6 +119,7 @@ for m in msgs:
     else:
         st.markdown(f"<div class='chat-bubble-bot'>{m['content']}</div>", unsafe_allow_html=True)
 
+# process new input
 if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
@@ -161,6 +144,10 @@ if user_text:
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
+
+    # save session history
+    st.session_state.sessions.append(st.session_state.current)
+    save_history(st.session_state.sessions)
 
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
