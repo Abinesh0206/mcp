@@ -2,10 +2,13 @@ import os, json, re, requests
 import streamlit as st
 
 # ---------- Config ----------
-OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-TITLE = os.getenv("UI_TITLE", "MasaBot")
-PRIMARY = os.getenv("THEME_PRIMARY", "#1e88e5")
-ACCENT = os.getenv("THEME_ACCENT", "#ff6f00")
+# ⚠ Hardcoded key (only for local testing!)
+GEMINI_API_KEY = "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk"
+GEMINI_MODEL = "gemini-1.5-flash"
+
+TITLE = "MasaBot"
+PRIMARY = "#1e88e5"
+ACCENT = "#ff6f00"
 
 CONFIG_PATH = os.path.join(os.getcwd(), "mcp_config.json")
 with open(CONFIG_PATH, "r") as f:
@@ -28,8 +31,7 @@ def call_mcp_http(server, query: str):
     except Exception as e:
         return f"[MCP:{server['name']}] error: {e}"
 
-def call_ollama(user_text: str, system=None, model="mistral:7b-instruct-v0.2-q4_0"):
-    # ---------- UPDATED + STRICT SYSTEM PROMPT ----------
+def call_gemini(user_text: str, system=None):
     system_prompt = f"""{system or "You are MasaBot, a DevOps AI assistant."}
 
 User may ask two types of queries:
@@ -64,25 +66,30 @@ User may ask two types of queries:
 ❌ Do not guess extra text. 
 ❌ Do not return natural language.
 ✅ Always return strict JSON with target + query.
+"""
 
-User: {user_text}
-Assistant:"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
-        "model": model,
-        "prompt": system_prompt,
-        "stream": False
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": system_prompt + "\n\nUser: " + user_text + "\nAssistant:"}
+                ]
+            }
+        ]
     }
+
     try:
-        r = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=120)
+        r = requests.post(url, json=payload, timeout=120)
         r.raise_for_status()
         js = r.json()
-        return js.get("response", "").strip()
+        return js["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
-        return f"[Ollama] error: {e}"
+        return f"[Gemini] error: {e}"
 
 def get_server_by_name(name: str):
-    # ---------- Alias mapping ----------
     aliases = {
         "k8s": "kubernetes",
         "kube": "kubernetes",
@@ -134,12 +141,11 @@ if user_text:
     msgs.append({"role": "user", "content": user_text})
     st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
 
-    with st.spinner("Ollama thinking…"):
-        ollama_answer = call_ollama(user_text)
+    with st.spinner("Gemini thinking…"):
+        gemini_answer = call_gemini(user_text)
 
-    # Try parse as JSON → means MCP request
     try:
-        parsed = json.loads(ollama_answer)
+        parsed = json.loads(gemini_answer)
         if isinstance(parsed, dict) and "target" in parsed and "query" in parsed:
             server = get_server_by_name(parsed["target"])
             if server:
@@ -149,9 +155,9 @@ if user_text:
             else:
                 answer = f"[Error] No MCP server found for: {parsed['target']}"
         else:
-            answer = ollama_answer
+            answer = gemini_answer
     except Exception:
-        answer = ollama_answer
+        answer = gemini_answer
 
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
