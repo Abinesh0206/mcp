@@ -78,18 +78,39 @@ def normalize_query(parsed: dict) -> str:
     """Map kubectl-like commands to server tool names"""
     q = parsed.get("query", "").lower()
 
-    if "get pods" in q:
-        return "list_pods"
-    if "get namespaces" in q:
-        return "list_namespaces"
-    if "get services" in q:
-        return "list_services"
-    if "get deployments" in q:
-        return "list_deployments"
-    if "create namespace" in q:
-        return "create_namespace " + q.split()[-1]
+    # direct kubectl mappings
+    if "kubectl get pods" in q:
+        return "list-pods"
+    if "kubectl get namespaces" in q:
+        return "list-namespaces"
+    if "kubectl get services" in q or "kubectl get svc" in q:
+        return "list-services"
+    if "kubectl get deployments" in q or "kubectl get deploy" in q:
+        return "list-deployments"
 
-    return q  # fallback
+    # handle wc -l (counts)
+    if "kubectl get pods" in q and "wc -l" in q:
+        return "count pods"
+    if "kubectl get namespaces" in q and "wc -l" in q:
+        return "count namespaces"
+    if ("kubectl get deployments" in q or "kubectl get deploy" in q) and "wc -l" in q:
+        return "count deployments"
+    if ("kubectl get services" in q or "kubectl get svc" in q) and "wc -l" in q:
+        return "count services"
+
+    # fallbacks (already supported by your server)
+    if "get pods" in q:
+        return "list-pods"
+    if "get namespaces" in q:
+        return "list-namespaces"
+    if "get services" in q:
+        return "list-services"
+    if "get deployments" in q:
+        return "list-deployments"
+    if "create namespace" in q:
+        return "create-namespace " + q.split()[-1]
+
+    return q
 
 # ---------- UI ----------
 st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
