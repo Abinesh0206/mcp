@@ -2,7 +2,7 @@ import os, json, re, requests
 import streamlit as st
 
 # ---------- Config ----------
-GEMINI_API_KEY = "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk"  # ⚠ local only
+GEMINI_API_KEY = "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8"  # ⚠ local only
 GEMINI_MODEL = "gemini-1.5-flash"
 
 TITLE = "MasaBot"
