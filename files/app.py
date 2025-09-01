@@ -67,6 +67,14 @@ def build_mcp_payload(query: str):
             "params": {}
         }
 
+def clean_sse_response(raw_text: str):
+    """ Extract JSON from SSE stream """
+    lines = [line for line in raw_text.splitlines() if line.startswith("data:")]
+    if not lines:
+        return raw_text
+    last_data = lines[-1].replace("data:", "").strip()
+    return last_data
+
 if st.button("Ask") and query:
     with st.spinner("Gemini thinking..."):
 
@@ -93,21 +101,18 @@ if st.button("Ask") and query:
 
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json, text/event-stream"
         }
 
         try:
             m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers)
-            m_text = m_res.text.strip()
-
-            # If response is wrapped in SSE, extract last data block
-            if "data:" in m_text:
-                m_text = m_text.split("data:")[-1].strip()
+            raw_text = m_res.text.strip()
+            clean_text = clean_sse_response(raw_text)
 
             try:
-                m_json = json.loads(m_text)
+                m_json = json.loads(clean_text)
             except Exception:
-                m_json = {"raw_response": m_text}
+                m_json = {"raw_response": raw_text}
 
         except Exception as e:
             st.error("⚠️ MCP Server error: " + str(e))
@@ -116,3 +121,16 @@ if st.button("Ask") and query:
         # Step 3: Show MCP server response
         st.write("### 📡 MCP Server Response")
         st.json(m_json)
+
+        # Step 4: Show counts (if applicable)
+        if isinstance(m_json, dict) and "result" in m_json:
+            try:
+                items = m_json["result"].get("items", [])
+                if "namespace" in query.lower():
+                    st.success(f"📦 Total namespaces: {len(items)}")
+                elif "node" in query.lower():
+                    st.success(f"🖥️ Total nodes: {len(items)}")
+                elif "pod" in query.lower():
+                    st.success(f"🐳 Total pods: {len(items)}")
+            except Exception:
+                pass
