@@ -22,9 +22,11 @@ def call_mcp_http(server, query: str):
         expanded = re.sub(r"\$\{([^}]+)\}", lambda m: os.getenv(m.group(1), ""), server["authHeader"])
         headers["Authorization"] = expanded
     try:
-        resp = requests.post(f"{base}/query", json={"prompt": query}, headers=headers, timeout=60)
+        # ✅ updated to use /mcp/query
+        resp = requests.post(f"{base}/mcp/query", json={"prompt": query}, headers=headers, timeout=60)
         if resp.status_code == 404:
-            resp = requests.post(f"{base}/chat", json={"prompt": query}, headers=headers, timeout=60)
+            # try fallback /mcp/chat
+            resp = requests.post(f"{base}/mcp/chat", json={"prompt": query}, headers=headers, timeout=60)
         resp.raise_for_status()
         js = resp.json()
         return js.get("result") or js.get("answer") or js.get("message") or js.get("content") or json.dumps(js)
@@ -73,7 +75,7 @@ def get_server_by_name(name: str):
             return srv
     return None
 
-# ---------- Mapper (fix) ----------
+# ---------- Mapper ----------
 def normalize_query(parsed: dict) -> str:
     """Map kubectl-like commands to server tool names"""
     q = parsed.get("query", "").lower()
@@ -138,7 +140,7 @@ st.markdown("### Start chatting")
 user_text = st.chat_input("Type your message…")
 msgs = st.session_state.current["messages"]
 
-# render chat history (this session only)
+# render chat history
 for m in msgs:
     if m["role"] == "user":
         st.markdown(f"<div class='chat-bubble-user'>{m['content']}</div>", unsafe_allow_html=True)
@@ -172,5 +174,6 @@ if user_text:
     msgs.append({"role": "assistant", "content": answer})
     st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
 
+# ✅ complete unfinished block
 if not st.session_state.current.get("title") and msgs:
     st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
