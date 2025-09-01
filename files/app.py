@@ -103,8 +103,20 @@ if st.button("Send") and user_input:
         tool_to_use = None
         tool_arguments = {}
         
+        # Check if user wants to count pods
+        if "how many pods" in user_input.lower() or "count pods" in user_input.lower():
+            for tool in tools:
+                if tool["name"] == "kubectl_get":
+                    tool_to_use = tool["name"]
+                    tool_arguments = {
+                        "resourceType": "pods",
+                        "allNamespaces": True,
+                        "output": "json"
+                    }
+                    break
+        
         # Check if user wants to create a namespace
-        if "create namespace" in user_input.lower():
+        elif "create namespace" in user_input.lower():
             namespace_name = user_input.lower().replace("create namespace", "").strip()
             for tool in tools:
                 if tool["name"] == "kubectl_create":
@@ -114,6 +126,22 @@ if st.button("Send") and user_input:
                         "name": namespace_name
                     }
                     break
+        
+        # Check if user wants to get any resource
+        elif "get " in user_input.lower():
+            # Extract resource type from query
+            parts = user_input.lower().split("get ")
+            if len(parts) > 1:
+                resource_part = parts[1].split()[0]
+                for tool in tools:
+                    if tool["name"] == "kubectl_get":
+                        tool_to_use = tool["name"]
+                        tool_arguments = {
+                            "resourceType": resource_part,
+                            "allNamespaces": True,
+                            "output": "json"
+                        }
+                        break
         
         # If we found a tool, try to call it
         if tool_to_use:
