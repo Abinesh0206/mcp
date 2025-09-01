@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-import os
+import json
 
 # --------------------
 # Config
@@ -24,27 +24,41 @@ st.write(f"**MCP URL:** {MCP_SERVER_URL}")
 user_input = st.text_input("💬 Ask something (Kubernetes / General):")
 
 if st.button("Send") and user_input:
-    # Call MCP server
+    # --------------------
+    # Call MCP server (JSON-RPC style)
+    # --------------------
     try:
-        mcp_response = requests.post(
-            MCP_SERVER_URL,
-            json={"query": user_input},
-            timeout=10
-        )
-        mcp_output = mcp_response.json()
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "query",
+            "params": {"query": user_input}
+        }
+        mcp_response = requests.post(MCP_SERVER_URL, json=payload, timeout=10)
+        if mcp_response.status_code == 200:
+            mcp_output = mcp_response.json()
+        else:
+            mcp_output = {"error": f"Status {mcp_response.status_code}", "body": mcp_response.text}
     except Exception as e:
         mcp_output = {"error": str(e)}
 
-    # Call Gemini API
+    # --------------------
+    # Call Gemini API (correct auth)
+    # --------------------
     try:
-        headers = {"Authorization": f"Bearer {GEMINI_API_KEY}"}
         gemini_response = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
-            headers=headers,
-            json={"contents": [{"parts": [{"text": user_input}]}]},
+            json={
+                "contents": [
+                    {"parts": [{"text": user_input}]}
+                ]
+            },
             timeout=10
         )
-        gemini_output = gemini_response.json()
+        if gemini_response.status_code == 200:
+            gemini_output = gemini_response.json()
+        else:
+            gemini_output = {"error": f"Status {gemini_response.status_code}", "body": gemini_response.text}
     except Exception as e:
         gemini_output = {"error": str(e)}
 
