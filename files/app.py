@@ -27,8 +27,8 @@ def build_mcp_payload(query: str):
             "method": "tools/kubectl_get",
             "params": {
                 "resourceType": "namespaces",
-                "namespace": "",
                 "name": "",
+                "namespace": "",
                 "allNamespaces": True,
                 "output": "json"
             }
@@ -40,8 +40,8 @@ def build_mcp_payload(query: str):
             "method": "tools/kubectl_get",
             "params": {
                 "resourceType": "nodes",
-                "namespace": "",
                 "name": "",
+                "namespace": "",
                 "allNamespaces": True,
                 "output": "json"
             }
@@ -53,14 +53,13 @@ def build_mcp_payload(query: str):
             "method": "tools/kubectl_get",
             "params": {
                 "resourceType": "pods",
-                "namespace": "",
                 "name": "",
+                "namespace": "",
                 "allNamespaces": True,
                 "output": "json"
             }
         }
     else:
-        # fallback
         return {
             "jsonrpc": "2.0",
             "id": "1",
@@ -89,21 +88,25 @@ if st.button("Ask") and query:
         st.write("### 🤖 Gemini Interpretation")
         st.info(gemini_text)
 
-        # Step 2: Convert query → MCP payload
+        # Step 2: Build MCP payload
         mcp_payload = build_mcp_payload(query)
 
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
+            "Accept": "application/json"
         }
 
         try:
             m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers)
             m_text = m_res.text.strip()
 
+            # If response is wrapped in SSE, extract last data block
+            if "data:" in m_text:
+                m_text = m_text.split("data:")[-1].strip()
+
             try:
-                m_json = json.loads(m_text.split("data:")[-1].strip())  # handle SSE
-            except:
+                m_json = json.loads(m_text)
+            except Exception:
                 m_json = {"raw_response": m_text}
 
         except Exception as e:
