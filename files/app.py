@@ -12,6 +12,7 @@ GEMINI_MODEL = "gemini-1.5-flash"
 
 HEADERS = {
     "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream"
 }
 
 # --------------------
