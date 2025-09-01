@@ -25,7 +25,7 @@ user_input = st.text_input("💬 Ask something (Kubernetes / General):")
 
 if st.button("Send") and user_input:
     # --------------------
-    # Call MCP server (JSON-RPC style)
+    # Call MCP server (JSON-RPC with correct headers)
     # --------------------
     try:
         payload = {
@@ -34,16 +34,27 @@ if st.button("Send") and user_input:
             "method": "query",
             "params": {"query": user_input}
         }
-        mcp_response = requests.post(MCP_SERVER_URL, json=payload, timeout=10)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        mcp_response = requests.post(MCP_SERVER_URL, json=payload, headers=headers, timeout=10)
+
         if mcp_response.status_code == 200:
-            mcp_output = mcp_response.json()
+            try:
+                mcp_output = mcp_response.json()
+            except json.JSONDecodeError:
+                mcp_output = {"raw_response": mcp_response.text}
         else:
-            mcp_output = {"error": f"Status {mcp_response.status_code}", "body": mcp_response.text}
+            mcp_output = {
+                "error": f"Status {mcp_response.status_code}",
+                "body": mcp_response.text
+            }
     except Exception as e:
         mcp_output = {"error": str(e)}
 
     # --------------------
-    # Call Gemini API (correct auth)
+    # Call Gemini API (correct key usage)
     # --------------------
     try:
         gemini_response = requests.post(
@@ -58,7 +69,10 @@ if st.button("Send") and user_input:
         if gemini_response.status_code == 200:
             gemini_output = gemini_response.json()
         else:
-            gemini_output = {"error": f"Status {gemini_response.status_code}", "body": gemini_response.text}
+            gemini_output = {
+                "error": f"Status {gemini_response.status_code}",
+                "body": gemini_response.text
+            }
     except Exception as e:
         gemini_output = {"error": str(e)}
 
