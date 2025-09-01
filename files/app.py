@@ -1,39 +1,54 @@
 import os, json, re, requests
 import streamlit as st
-import google.generativeai as genai
 
 # ---------- Config ----------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-
+GEMINI_API_KEY = "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8"
+GEMINI_MODEL = "gemini-1.5-flash"
 TITLE = os.getenv("UI_TITLE", "MasaBot")
 PRIMARY = os.getenv("THEME_PRIMARY", "#1e88e5")
 ACCENT = os.getenv("THEME_ACCENT", "#ff6f00")
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://18.234.91.216:3000/mcp")
+MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
 
 HEADERS = {
     "Content-Type": "application/json",
-    "Accept": "application/json"
+    "Accept": "application/json, text/event-stream"
 }
-
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------- Helpers ----------
 def mcp_request(payload):
     try:
+        # For MCP, we need to handle Server-Sent Events (SSE)
         response = requests.post(
             MCP_SERVER_URL, 
             json=payload, 
             headers=HEADERS, 
-            timeout=30
+            timeout=15,
+            stream=True
         )
         
         if response.status_code != 200:
             return {"error": f"Status {response.status_code}", "body": response.text}
         
-        return response.json()
+        # Parse SSE response
+        full_response = ""
+        for line in response.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith('data:'):
+                    json_data = decoded_line[5:].strip()
+                    if json_data:
+                        try:
+                            parsed_data = json.loads(json_data)
+                            return parsed_data
+                        except json.JSONDecodeError:
+                            full_response += json_data + "\n"
+        
+        # If we didn't get proper JSON, return the raw response
+        if full_response:
+            return {"raw_response": full_response}
+        else:
+            return {"error": "Empty response from MCP server"}
             
     except Exception as e:
         return {"error": str(e)}
@@ -57,9 +72,28 @@ User may ask two types of questions:
 User: {user_text}
 Assistant:"""
 
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(full_prompt)
-        return response.text.strip()
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            json={
+                "contents": [{
+                    "parts": [{"text": full_prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 1024
+                }
+            },
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if "candidates" in data and len(data["candidates"]) > 0:
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            else:
+                return "Error: No response from Gemini"
+        else:
+            return f"Error: Gemini API returned status {response.status_code}"
             
     except Exception as e:
         return f"[Gemini] error: {e}"
