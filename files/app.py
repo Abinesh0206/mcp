@@ -16,6 +16,58 @@ st.title("🤖 MasaBot – MCP + Gemini UI")
 # ---------------- CHAT INPUT ----------------
 query = st.text_input("💬 Ask something (Kubernetes / General):", "")
 
+def build_mcp_payload(query: str):
+    """ Map user query to correct MCP tool call """
+    q = query.lower()
+
+    if "namespace" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/kubectl_get",
+            "params": {
+                "resourceType": "namespaces",
+                "namespace": "",
+                "name": "",
+                "allNamespaces": True,
+                "output": "json"
+            }
+        }
+    elif "node" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/kubectl_get",
+            "params": {
+                "resourceType": "nodes",
+                "namespace": "",
+                "name": "",
+                "allNamespaces": True,
+                "output": "json"
+            }
+        }
+    elif "pod" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "tools/kubectl_get",
+            "params": {
+                "resourceType": "pods",
+                "namespace": "",
+                "name": "",
+                "allNamespaces": True,
+                "output": "json"
+            }
+        }
+    else:
+        # fallback
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "ping",
+            "params": {}
+        }
+
 if st.button("Ask") and query:
     with st.spinner("Gemini thinking..."):
 
@@ -30,35 +82,15 @@ if st.button("Ask") and query:
 
         try:
             gemini_text = g_json["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception as e:
+        except Exception:
             st.error("⚠️ Gemini error: " + str(g_json))
             st.stop()
 
         st.write("### 🤖 Gemini Interpretation")
         st.info(gemini_text)
 
-        # Step 2: Convert query to MCP call
-        # Simple mapping: if query contains "namespace", call kubectl_get namespaces
-        if "namespace" in query.lower():
-            mcp_payload = {
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/kubectl_get",
-                "params": {
-                    "resourceType": "namespaces",
-                    "namespace": "",      # not needed for namespaces
-                    "name": "",           # empty means list all
-                    "allNamespaces": True,
-                    "output": "json"
-                }
-            }
-        else:
-            mcp_payload = {
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "ping",
-                "params": {}
-            }
+        # Step 2: Convert query → MCP payload
+        mcp_payload = build_mcp_payload(query)
 
         headers = {
             "Content-Type": "application/json",
@@ -70,7 +102,7 @@ if st.button("Ask") and query:
             m_text = m_res.text.strip()
 
             try:
-                m_json = json.loads(m_text)
+                m_json = json.loads(m_text.split("data:")[-1].strip())  # handle SSE
             except:
                 m_json = {"raw_response": m_text}
 
@@ -80,4 +112,4 @@ if st.button("Ask") and query:
 
         # Step 3: Show MCP server response
         st.write("### 📡 MCP Server Response")
-        st.success(m_json)
+        st.json(m_json)
