@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import json
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
@@ -18,7 +19,7 @@ query = st.text_input("💬 Ask something (Kubernetes / General):", "")
 if st.button("Ask") and query:
     with st.spinner("Gemini thinking..."):
 
-        # Step 1: Send query to Gemini to process
+        # Step 1: Ask Gemini to interpret
         gemini_payload = {
             "contents": [{
                 "parts": [{"text": query}]
@@ -36,25 +37,43 @@ if st.button("Ask") and query:
         st.write("### 🤖 Gemini Interpretation")
         st.info(gemini_text)
 
-        # Step 2: Send interpreted query to MCP server
-        # Example: call kubectl get namespaces
-        try:
+        # Step 2: Convert query to MCP call
+        # Simple mapping: if query contains "namespace", call kubectl_get namespaces
+        if "namespace" in query.lower():
             mcp_payload = {
                 "jsonrpc": "2.0",
                 "id": "1",
-                "method": "tools/kubectl",   # MCP server tool
+                "method": "tools/kubectl_get",
                 "params": {
-                    "query": "kubectl get namespaces"   # static for now
+                    "resourceType": "namespaces",
+                    "namespace": "",      # not needed for namespaces
+                    "name": "",           # empty means list all
+                    "allNamespaces": True,
+                    "output": "json"
                 }
             }
-
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
+        else:
+            mcp_payload = {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "method": "ping",
+                "params": {}
             }
 
-            m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers, stream=False)
-            m_json = m_res.json()
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+
+        try:
+            m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers)
+            m_text = m_res.text.strip()
+
+            try:
+                m_json = json.loads(m_text)
+            except:
+                m_json = {"raw_response": m_text}
+
         except Exception as e:
             st.error("⚠️ MCP Server error: " + str(e))
             st.stop()
