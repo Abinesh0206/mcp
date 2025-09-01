@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-import os
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
@@ -30,22 +29,31 @@ if st.button("Ask") and query:
 
         try:
             gemini_text = g_json["candidates"][0]["content"]["parts"][0]["text"]
-        except:
+        except Exception as e:
             st.error("⚠️ Gemini error: " + str(g_json))
             st.stop()
 
         st.write("### 🤖 Gemini Interpretation")
         st.info(gemini_text)
 
-        # Step 2: Send Gemini interpreted query to MCP server
+        # Step 2: Send interpreted query to MCP server
+        # Example: call kubectl get namespaces
         try:
             mcp_payload = {
                 "jsonrpc": "2.0",
                 "id": "1",
-                "method": "query",
-                "params": {"q": gemini_text}
+                "method": "tools/kubectl",   # MCP server tool
+                "params": {
+                    "query": "kubectl get namespaces"   # static for now
+                }
             }
-            m_res = requests.post(MCP_SERVER_URL, json=mcp_payload)
+
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            }
+
+            m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers, stream=False)
             m_json = m_res.json()
         except Exception as e:
             st.error("⚠️ MCP Server error: " + str(e))
