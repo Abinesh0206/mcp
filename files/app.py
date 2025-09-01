@@ -4,7 +4,7 @@ import json
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
-GEMINI_API_KEY = "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8"
+GEMINI_API_KEY = "AIzaSyCRzcy-dLSjK8zW7FVZCDekggClj_SoCv0"
 GEMINI_MODEL = "gemini-1.5-flash"
 
 # Gemini endpoint
