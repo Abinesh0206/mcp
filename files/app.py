@@ -99,12 +99,21 @@ if st.button("Send") and user_input:
     if "result" in tools_response and "tools" in tools_response["result"]:
         tools = tools_response["result"]["tools"]
         
-        # Look for a relevant tool - try to find one that matches our query
+        # Look for a relevant tool based on the user's query
         tool_to_use = None
-        for tool in tools:
-            if "kubernetes" in tool.get("name", "").lower() or "query" in tool.get("name", "").lower():
-                tool_to_use = tool["name"]
-                break
+        tool_arguments = {}
+        
+        # Check if user wants to create a namespace
+        if "create namespace" in user_input.lower():
+            namespace_name = user_input.lower().replace("create namespace", "").strip()
+            for tool in tools:
+                if tool["name"] == "kubectl_create":
+                    tool_to_use = tool["name"]
+                    tool_arguments = {
+                        "resourceType": "namespace",
+                        "name": namespace_name
+                    }
+                    break
         
         # If we found a tool, try to call it
         if tool_to_use:
@@ -114,12 +123,12 @@ if st.button("Send") and user_input:
                 "method": "tools/call",
                 "params": {
                     "name": tool_to_use,
-                    "arguments": {"query": user_input}
+                    "arguments": tool_arguments
                 }
             }
             mcp_output = mcp_request(call_payload)
         else:
-            mcp_output = {"error": "No Kubernetes tool found in available tools"}
+            mcp_output = {"error": "No appropriate tool found for this request"}
     else:
         mcp_output = {"error": "Could not retrieve tools list from MCP server"}
 
