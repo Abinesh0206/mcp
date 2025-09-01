@@ -1,21 +1,23 @@
-import os, json, re, requests
 import streamlit as st
+import requests
+import json
+import re
 
-# ---------- Config ----------
+# --------------------
+# Config
+# --------------------
+MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
 GEMINI_API_KEY = "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8"
 GEMINI_MODEL = "gemini-1.5-flash"
-TITLE = os.getenv("UI_TITLE", "MasaBot")
-PRIMARY = os.getenv("THEME_PRIMARY", "#1e88e5")
-ACCENT = os.getenv("THEME_ACCENT", "#ff6f00")
-
-MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
 
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream"
 }
 
-# ---------- Helpers ----------
+# --------------------
+# Helpers
+# --------------------
 def mcp_request(payload):
     try:
         # For MCP, we need to handle Server-Sent Events (SSE)
@@ -53,50 +55,18 @@ def mcp_request(payload):
     except Exception as e:
         return {"error": str(e)}
 
-def call_gemini(user_text: str, system_prompt=None):
+def gemini_request(prompt: str):
     try:
-        # Prepare the prompt with system instructions
-        full_prompt = f"""{system_prompt or "You are MasaBot, a DevOps AI assistant."}
-
-User may ask two types of questions:
-1. General/explanatory → answer directly in plain text.
-2. Live/system query (Kubernetes, ArgoCD, Jenkins) → DO NOT answer directly. Instead, respond ONLY in JSON like this:
-   {{ "target": "kubernetes", "query": "get pods in all namespaces" }}
-   or
-   {{ "target": "jenkins", "query": "list all jobs" }}
-   or
-   {{ "target": "argocd", "query": "sync app myapp" }}
-
-⚠ Allowed targets = ["kubernetes", "argocd", "jenkins"]
-
-User: {user_text}
-Assistant:"""
-
         response = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}",
-            json={
-                "contents": [{
-                    "parts": [{"text": full_prompt}]
-                }],
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": 1024
-                }
-            },
-            timeout=120
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=15
         )
-        
         if response.status_code == 200:
-            data = response.json()
-            if "candidates" in data and len(data["candidates"]) > 0:
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            else:
-                return "Error: No response from Gemini"
-        else:
-            return f"Error: Gemini API returned status {response.status_code}"
-            
+            return response.json()
+        return {"error": f"Status {response.status_code}", "body": response.text}
     except Exception as e:
-        return f"[Gemini] error: {e}"
+        return {"error": str(e)}
 
 def parse_kubernetes_query(query):
     """Parse natural language query into MCP tool arguments"""
@@ -155,172 +125,159 @@ def parse_kubernetes_query(query):
     
     return None, {}
 
-# ---------- UI ----------
-st.set_page_config(page_title=TITLE, page_icon="🤖", layout="wide")
-
-st.markdown(f"""
-<style>
-  .chat-bubble-user {{
-    border-left: 4px solid {PRIMARY}; padding: 12px; margin: 8px 0;
-    border-radius: 12px; background: #f5f9ff;
-    font-size: 18px; line-height: 1.5;
-  }}
-  .chat-bubble-bot {{
-    border-left: 4px solid {ACCENT}; padding: 12px; margin: 8px 0;
-    border-radius: 12px; background: #fff8f0;
-    font-size: 18px; line-height: 1.5;
-  }}
-  .mcp-response {{
-    border: 1px solid #ddd; padding: 12px; margin: 8px 0;
-    border-radius: 8px; background: #f9f9f9;
-    font-family: monospace; font-size: 14px;
-  }}
-</style>
-""", unsafe_allow_html=True)
-
-if "sessions" not in st.session_state:
-    st.session_state.sessions = []
-if "current" not in st.session_state:
-    st.session_state.current = {"title": "New chat", "messages": []}
-
+# --------------------
+# UI Layout
+# --------------------
+st.set_page_config(page_title="MasaBot", page_icon="🤖", layout="centered")
 st.title("🤖 MasaBot – MCP + Gemini UI")
-st.markdown(f"### 🔗 Connected to MCP server: {MCP_SERVER_URL}")
 
-# Display connection status
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("Test MCP Connection"):
-        try:
-            ping_payload = {
-                "jsonrpc": "2.0",
-                "id": "ping-test",
-                "method": "ping",
-                "params": {}
-            }
-            response = mcp_request(ping_payload)
-            if "result" in response:
-                st.success("✅ MCP Server is connected and responsive!")
+st.markdown("### 🔗 Connected to MCP server")
+st.write(f"**MCP URL:** {MCP_SERVER_URL}")
+
+# --------------------
+# User Input
+# --------------------
+user_input = st.text_input("💬 Ask something (Kubernetes / General):")
+
+if st.button("Send") and user_input:
+    # First, ask MCP which tools exist (using correct MCP method)
+    tools_payload = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tools/list",
+        "params": {}
+    }
+    tools_response = mcp_request(tools_payload)
+    
+    # Try calling a tool if available
+    mcp_output = {"error": "No suitable tool found"}
+    mcp_success = False
+    
+    # Check if we got a valid tools list
+    if "result" in tools_response and "tools" in tools_response["result"]:
+        tools = tools_response["result"]["tools"]
+        
+        # Parse the user query to determine which tool to use
+        tool_name, tool_args = parse_kubernetes_query(user_input)
+        
+        # If we found a matching tool, try to call it
+        if tool_name:
+            # Check if the tool exists in available tools
+            tool_exists = any(tool["name"] == tool_name for tool in tools)
+            
+            if tool_exists:
+                call_payload = {
+                    "jsonrpc": "2.0",
+                    "id": "2",
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": tool_args
+                    }
+                }
+                st.write(f"🔧 Using MCP tool: **{tool_name}**")
+                mcp_output = mcp_request(call_payload)
+                
+                # Check if MCP call was successful
+                if "result" in mcp_output and "content" in mcp_output["result"]:
+                    mcp_success = True
+                    st.success("✅ MCP Server successfully executed the command!")
+                else:
+                    st.error("❌ MCP Server returned an error")
             else:
-                st.error(f"❌ MCP Server error: {response.get('error', 'Unknown error')}")
-        except Exception as e:
-            st.error(f"❌ Cannot connect to MCP Server: {str(e)}")
+                mcp_output = {"error": f"Tool '{tool_name}' not found in available tools"}
+        else:
+            mcp_output = {"error": "Could not parse your query into a Kubernetes command"}
+    else:
+        mcp_output = {"error": "Could not retrieve tools list from MCP server"}
 
-with col2:
-    if st.button("Show Available Tools"):
-        tools_payload = {
+    # Gemini call - only if MCP didn't succeed or we need additional explanation
+    gemini_output = gemini_request(user_input)
+
+    # --------------------
+    # Display results
+    # --------------------
+    st.subheader("📡 MCP Server - Tools List")
+    st.json(tools_response)
+
+    st.subheader("📡 MCP Server - Tool Call Response")
+    
+    # Display MCP output in a more readable format if it's successful
+    if mcp_success and "result" in mcp_output and "content" in mcp_output["result"]:
+        mcp_content = mcp_output["result"]["content"]
+        
+        # Try to parse JSON output for better display
+        if isinstance(mcp_content, list) and len(mcp_content) > 0:
+            content_text = mcp_content[0].get("text", "")
+            
+            # Try to parse as JSON for better formatting
+            try:
+                parsed_json = json.loads(content_text)
+                st.json(parsed_json)
+                
+                # If it's a list of pods, count them
+                if isinstance(parsed_json, dict) and "items" in parsed_json:
+                    pod_count = len(parsed_json["items"])
+                    st.info(f"📊 Found {pod_count} pods")
+                    
+            except json.JSONDecodeError:
+                # If not JSON, display as text
+                st.text_area("MCP Response", content_text, height=200)
+        else:
+            st.json(mcp_output)
+    else:
+        st.json(mcp_output)
+
+    st.subheader("🌐 Gemini AI Response")
+    
+    # Extract and display the text response from Gemini
+    if "candidates" in gemini_output and len(gemini_output["candidates"]) > 0:
+        gemini_text = gemini_output["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # If MCP was successful, show Gemini response as additional info
+        if mcp_success:
+            st.info("💡 Additional information from Gemini:")
+            st.markdown(gemini_text)
+        else:
+            # If MCP failed, show Gemini response as primary answer
+            st.warning("⚠️  MCP couldn't process your request, but here's information from Gemini:")
+            st.markdown(gemini_text)
+    else:
+        st.json(gemini_output)
+
+# Display connection status and tools in sidebar
+st.sidebar.markdown("## 🔗 Connection Status")
+if st.sidebar.button("Test MCP Connection"):
+    try:
+        ping_payload = {
             "jsonrpc": "2.0",
-            "id": "tools-list",
-            "method": "tools/list",
+            "id": "ping-test",
+            "method": "ping",
             "params": {}
         }
-        tools_response = mcp_request(tools_payload)
-        if "result" in tools_response and "tools" in tools_response["result"]:
-            st.markdown("### 🛠️ Available Tools")
-            for tool in tools_response["result"]["tools"]:
-                st.write(f"**{tool['name']}**: {tool['description']}")
+        response = mcp_request(ping_payload)
+        if "result" in response:
+            st.sidebar.success("✅ MCP Server is connected and responsive!")
         else:
-            st.error("Could not retrieve tools list")
-
-st.markdown("---")
-st.markdown("### 💬 Start chatting")
-
-user_text = st.chat_input("Type your Kubernetes query or general question...")
-msgs = st.session_state.current["messages"]
-
-# render chat history
-for m in msgs:
-    if m["role"] == "user":
-        st.markdown(f"<div class='chat-bubble-user'>{m['content']}</div>", unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div class='chat-bubble-bot'>{m['content']}</div>", unsafe_allow_html=True)
-
-if user_text:
-    msgs.append({"role": "user", "content": user_text})
-    st.markdown(f"<div class='chat-bubble-user'>{user_text}</div>", unsafe_allow_html=True)
-
-    with st.spinner("Gemini thinking…"):
-        gemini_answer = call_gemini(user_text)
-
-    # Try parse as JSON → means MCP request
-    try:
-        parsed = json.loads(gemini_answer)
-        if isinstance(parsed, dict) and "target" in parsed and "query" in parsed:
-            if parsed["target"] == "kubernetes":
-                # Parse the query for MCP
-                tool_name, tool_args = parse_kubernetes_query(parsed["query"])
-                
-                if tool_name:
-                    # Get tools list first
-                    tools_payload = {
-                        "jsonrpc": "2.0",
-                        "id": "tools-list",
-                        "method": "tools/list",
-                        "params": {}
-                    }
-                    tools_response = mcp_request(tools_payload)
-                    
-                    if "result" in tools_response and "tools" in tools_response["result"]:
-                        tools = tools_response["result"]["tools"]
-                        tool_exists = any(tool["name"] == tool_name for tool in tools)
-                        
-                        if tool_exists:
-                            with st.spinner(f"Querying MCP Kubernetes: {tool_name}"):
-                                call_payload = {
-                                    "jsonrpc": "2.0",
-                                    "id": "mcp-call",
-                                    "method": "tools/call",
-                                    "params": {
-                                        "name": tool_name,
-                                        "arguments": tool_args
-                                    }
-                                }
-                                mcp_result = mcp_request(call_payload)
-                            
-                            # Format MCP response
-                            if "result" in mcp_result and "content" in mcp_result["result"]:
-                                mcp_content = mcp_result["result"]["content"]
-                                if isinstance(mcp_content, list) and len(mcp_content) > 0:
-                                    content_text = mcp_content[0].get("text", "")
-                                    
-                                    # Try to parse as JSON for better formatting
-                                    try:
-                                        parsed_json = json.loads(content_text)
-                                        formatted_response = json.dumps(parsed_json, indent=2)
-                                        
-                                        # If it's a list of pods, count them
-                                        if isinstance(parsed_json, dict) and "items" in parsed_json:
-                                            pod_count = len(parsed_json["items"])
-                                            answer = f"✅ MCP Kubernetes Response:\n\nFound {pod_count} items\n\n```json\n{formatted_response}\n```"
-                                        else:
-                                            answer = f"✅ MCP Kubernetes Response:\n\n```json\n{formatted_response}\n```"
-                                            
-                                    except json.JSONDecodeError:
-                                        answer = f"✅ MCP Kubernetes Response:\n\n{content_text}"
-                                else:
-                                    answer = f"✅ MCP Kubernetes Response:\n\n{json.dumps(mcp_result, indent=2)}"
-                            else:
-                                answer = f"❌ MCP Error:\n\n{json.dumps(mcp_result, indent=2)}"
-                        else:
-                            answer = f"❌ Tool '{tool_name}' not found in MCP server"
-                    else:
-                        answer = f"❌ Could not retrieve tools from MCP server"
-                else:
-                    answer = f"❌ Could not parse query: {parsed['query']}"
-            else:
-                answer = f"❌ Only Kubernetes target is currently supported. Requested: {parsed['target']}"
-        else:
-            answer = gemini_answer
-    except json.JSONDecodeError:
-        # Normal text response from Gemini
-        answer = gemini_answer
+            st.sidebar.error(f"❌ MCP Server error: {response.get('error', 'Unknown error')}")
     except Exception as e:
-        answer = f"❌ Error processing response: {str(e)}"
+        st.sidebar.error(f"❌ Cannot connect to MCP Server: {str(e)}")
 
-    msgs.append({"role": "assistant", "content": answer})
-    st.markdown(f"<div class='chat-bubble-bot'>{answer}</div>", unsafe_allow_html=True)
-
-if not st.session_state.current.get("title") and msgs:
-    st.session_state.current["title"] = msgs[0]["content"][:30] + "…"
+# Display available tools
+if st.sidebar.button("Show Available Tools"):
+    tools_payload = {
+        "jsonrpc": "2.0",
+        "id": "tools-list",
+        "method": "tools/list",
+        "params": {}
+    }
+    tools_response = mcp_request(tools_payload)
+    if "result" in tools_response and "tools" in tools_response["result"]:
+        st.sidebar.markdown("## 🛠️ Available Tools")
+        for tool in tools_response["result"]["tools"]:
+            st.sidebar.write(f"**{tool['name']}**: {tool['description']}")
+    else:
+        st.sidebar.error("Could not retrieve tools list")
 
 # Add examples
 st.sidebar.markdown("## 💡 Example Queries")
