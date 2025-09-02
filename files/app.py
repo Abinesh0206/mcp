@@ -24,7 +24,7 @@ def build_mcp_payload(query: str):
     if "diagnose" in q or "troubleshoot" in q:
         return {
             "jsonrpc": "2.0",
-            "id": "1",
+            "id": 1,
             "method": "prompts/get",
             "params": {
                 "name": "k8s-diagnose",
@@ -38,76 +38,49 @@ def build_mcp_payload(query: str):
     elif "namespace" in q:
         return {
             "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_get",
+            "id": 1,
+            "method": "tools/call",
             "params": {
-                "resourceType": "namespaces",
-                "allNamespaces": True,
-                "output": "json"
-            }
-        }
-
-    elif "node" in q and "describe" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_describe",
-            "params": {
-                "resourceType": "nodes",
-                "name": "",   # TODO: extract node name if provided
-                "namespace": "default"
+                "name": "kubectl_get",
+                "arguments": {
+                    "resourceType": "namespaces",
+                    "namespace": "default",
+                    "output": "json"
+                }
             }
         }
 
     elif "node" in q:
         return {
             "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_get",
+            "id": 1,
+            "method": "tools/call",
             "params": {
-                "resourceType": "nodes",
-                "allNamespaces": True,
-                "output": "json"
-            }
-        }
-
-    elif "pod" in q and "logs" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_logs",
-            "params": {
-                "name": "",   # TODO: extract pod name from query
-                "namespace": "default",
-                "tailLines": 50
-            }
-        }
-
-    elif "pod" in q and "describe" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_describe",
-            "params": {
-                "resourceType": "pods",
-                "name": "",   # TODO: extract pod name from query
-                "namespace": "default"
+                "name": "kubectl_get",
+                "arguments": {
+                    "resourceType": "nodes",
+                    "namespace": "default",
+                    "output": "json"
+                }
             }
         }
 
     elif "pod" in q:
         return {
             "jsonrpc": "2.0",
-            "id": "1",
-            "method": "kubectl_get",
+            "id": 1,
+            "method": "tools/call",
             "params": {
-                "resourceType": "pods",
-                "allNamespaces": True,
-                "output": "json"
+                "name": "kubectl_get",
+                "arguments": {
+                    "resourceType": "pods",
+                    "namespace": "default",
+                    "output": "json"
+                }
             }
         }
 
-    return {"jsonrpc": "2.0", "id": "1", "method": "ping", "params": {}}
+    return {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}
 
 
 def clean_sse_response(raw_text: str):
@@ -129,7 +102,7 @@ if st.button("Ask") and query:
         try:
             gemini_text = g_json["candidates"][0]["content"]["parts"][0]["text"]
         except Exception:
-            st.error("⚠️ Gemini error: " + str(g_json))
+            st.error("⚠ Gemini error: " + str(g_json))
             st.stop()
 
         st.write("### 🤖 Gemini Interpretation")
@@ -154,7 +127,7 @@ if st.button("Ask") and query:
                 m_json = {"raw_response": raw_text}
 
         except Exception as e:
-            st.error("⚠️ MCP Server error: " + str(e))
+            st.error("⚠ MCP Server error: " + str(e))
             st.stop()
 
         # Step 3: Show MCP server response
@@ -164,11 +137,17 @@ if st.button("Ask") and query:
         # Step 4: Show counts if applicable
         if isinstance(m_json, dict) and "result" in m_json:
             try:
-                items = m_json["result"].get("items", [])
+                items = []
+                # MCP returns inside result.content[0].text (json string)
+                if "content" in m_json["result"]:
+                    text_data = m_json["result"]["content"][0]["text"]
+                    parsed = json.loads(text_data)
+                    items = parsed.get("items", [])
+
                 if "namespace" in query.lower():
                     st.success(f"📦 Total namespaces: {len(items)}")
                 elif "node" in query.lower():
-                    st.success(f"🖥️ Total nodes: {len(items)}")
+                    st.success(f"🖥 Total nodes: {len(items)}")
                 elif "pod" in query.lower():
                     st.success(f"🐳 Total pods: {len(items)}")
             except Exception:
