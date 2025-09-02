@@ -4,7 +4,7 @@ import json
 import re
 
 # ---------------- CONFIG ----------------
-CONFIG_FILE = "mcp_config.example.json"   # keep your config in this file
+CONFIG_FILE = "servers.json"   # keep your config in this file
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
