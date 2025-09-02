@@ -25,16 +25,15 @@ api_key = st.sidebar.text_input("Gemini API Key", GEMINI_API_KEY, type="password
 model = st.sidebar.text_input("Gemini Model", GEMINI_MODEL)
 
 # ---------------- FUNCTIONS ----------------
-def query_mcp(query: str):
-    """Send JSON-RPC request to MCP server"""
+def query_mcp(tool_name: str, arguments: dict):
+    """Send JSON-RPC call_tool request to MCP server"""
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
-        "method": "query",   # 🔴 may need to match your server's method name
+        "method": "call_tool",
         "params": {
-            "prompt": query,
-            "model": model,
-            "apiKey": api_key
+            "name": tool_name,
+            "arguments": arguments
         }
     }
     headers = {
@@ -57,6 +56,19 @@ def query_mcp(query: str):
     except Exception as e:
         return {"error": str(e)}
 
+def parse_user_query(query: str):
+    """
+    Simple mapping from user text -> tool + arguments.
+    Extend this with Gemini later if you want smarter mapping.
+    """
+    if "namespace" in query.lower():
+        return "kubectl_get", {"resource": "namespaces"}
+    elif "pods" in query.lower():
+        return "kubectl_get", {"resource": "pods", "namespace": "default"}
+    else:
+        # default fall back
+        return "kubectl_get", {"resource": "namespaces"}
+
 # ---------------- CHAT UI ----------------
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
@@ -69,14 +81,17 @@ if query := st.chat_input("Type your query..."):
     with st.chat_message("user"):
         st.markdown(query)
 
+    # Convert text -> tool call
+    tool_name, args = parse_user_query(query)
+
     # Query MCP server
-    response = query_mcp(query)
+    response = query_mcp(tool_name, args)
 
     # Handle server reply
     if "error" in response:
         reply = f"❌ Error: {response['error']}"
     elif "result" in response:
-        reply = response["result"]
+        reply = json.dumps(response["result"], indent=2)
     elif "raw" in response:
         reply = f"📡 Raw response:\n\n```\n{response['raw']}\n```"
     else:
