@@ -2,9 +2,12 @@ import streamlit as st
 import requests
 import json
 import re
+import os
 
 # ---------------- CONFIG ----------------
-CONFIG_FILE = "servers.json"   # keep your config in this file
+BASE_DIR = os.path.dirname(__file__)  # directory of this script
+CONFIG_FILE = os.path.join(BASE_DIR, "servers.json")  # absolute path to servers.json
+
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
