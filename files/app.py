@@ -5,12 +5,14 @@ import uuid
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
+GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="🤖", layout="wide")
 
 st.title("🤖 MCP Client UI")
-st.markdown("Chat with **MCP Server** (JSON-RPC 2.0)")
+st.markdown("Chat with **MCP Server** (JSON-RPC 2.0 + Gemini)")
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -19,27 +21,38 @@ if "messages" not in st.session_state:
 # Sidebar config
 st.sidebar.header("⚙️ Configuration")
 server_url = st.sidebar.text_input("MCP Server URL", MCP_SERVER_URL)
+api_key = st.sidebar.text_input("Gemini API Key", GEMINI_API_KEY, type="password")
+model = st.sidebar.text_input("Gemini Model", GEMINI_MODEL)
 
 # ---------------- FUNCTIONS ----------------
 def query_mcp(query: str):
     """Send JSON-RPC request to MCP server"""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "query",   # 🔴 may need to match your server's method name
+        "params": {
+            "prompt": query,
+            "model": model,
+            "apiKey": api_key
+        }
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
+    }
+
     try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),   # unique ID per request
-            "method": "query",         # RPC method name (must match MCP server)
-            "params": {"prompt": query}
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
-        }
         response = requests.post(server_url, data=json.dumps(payload), headers=headers, timeout=30)
 
-        if response.status_code == 200:
-            return response.json()
-        else:
+        if response.status_code != 200:
             return {"error": f"HTTP {response.status_code}: {response.text}"}
+
+        # Try to decode as JSON
+        try:
+            return response.json()
+        except Exception:
+            return {"raw": response.text}   # fallback for event-stream / plain text
 
     except Exception as e:
         return {"error": str(e)}
@@ -62,8 +75,12 @@ if query := st.chat_input("Type your query..."):
     # Handle server reply
     if "error" in response:
         reply = f"❌ Error: {response['error']}"
+    elif "result" in response:
+        reply = response["result"]
+    elif "raw" in response:
+        reply = f"📡 Raw response:\n\n```\n{response['raw']}\n```"
     else:
-        reply = response.get("result", json.dumps(response, indent=2))
+        reply = json.dumps(response, indent=2)
 
     # Save & display assistant message
     st.session_state["messages"].append({"role": "assistant", "content": reply})
