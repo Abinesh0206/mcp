@@ -1,6 +1,6 @@
+import streamlit as st
 import requests
 import json
-import os
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000"
@@ -11,13 +11,10 @@ GEMINI_MODEL = "gemini-1.5-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
 def query_mcp_server(target: str, query: str):
-    """
-    Sends a query to the MCP server (your Kubernetes MCP server).
-    """
     try:
         payload = {
-            "target": target,   # e.g. "kubernetes"
-            "query": query      # e.g. "get namespaces"
+            "target": target,
+            "query": query
         }
         response = requests.post(f"{MCP_SERVER_URL}/mcp", json=payload, timeout=30)
         response.raise_for_status()
@@ -26,9 +23,6 @@ def query_mcp_server(target: str, query: str):
         return {"error": str(e)}
 
 def ask_gemini(prompt: str):
-    """
-    Sends the query/response to Gemini for interpretation and response.
-    """
     try:
         headers = {"Content-Type": "application/json"}
         data = {
@@ -43,30 +37,36 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"❌ Gemini Error: {str(e)}"
 
-def chatbot():
-    """
-    Interactive chatbot loop
-    """
-    print("🤖 MasaBot – MCP + Gemini Chatbot")
-    print("Connected to MCP server:", MCP_SERVER_URL)
-    print("Type 'exit' to quit.\n")
+# ---------------- STREAMLIT UI ----------------
+st.set_page_config(page_title="MasaBot – MCP + Gemini", layout="wide")
+st.title("🤖 MasaBot – MCP + Gemini Chatbot")
+st.caption(f"🔗 Connected to MCP server: `{MCP_SERVER_URL}`")
 
-    while True:
-        user_input = input("💬 You: ")
-        if user_input.lower() in ["exit", "quit"]:
-            print("👋 Goodbye!")
-            break
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-        # 1️⃣ Send user query to MCP server
-        mcp_response = query_mcp_server("kubernetes", user_input)
+# Chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-        # 2️⃣ Forward MCP response to Gemini
-        gemini_prompt = f"User asked: {user_input}\nMCP Server Response: {json.dumps(mcp_response, indent=2)}\n\nExplain or answer in simple terms."
-        gemini_answer = ask_gemini(gemini_prompt)
+# User input (Streamlit chat input replaces input())
+if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-        # 3️⃣ Show response
-        print(f"\n📡 MCP Response: {mcp_response}\n")
-        print(f"🤖 Gemini: {gemini_answer}\n")
+    # 1️⃣ Query MCP server
+    mcp_response = query_mcp_server("kubernetes", prompt)
 
-if __name__ == "__main__":
-    chatbot()
+    # 2️⃣ Ask Gemini
+    gemini_prompt = f"User asked: {prompt}\nMCP Server Response: {json.dumps(mcp_response, indent=2)}\n\nExplain or answer in simple terms."
+    gemini_answer = ask_gemini(gemini_prompt)
+
+    # 3️⃣ Show MCP + Gemini response
+    response_text = f"📡 **MCP Response:**\n```json\n{json.dumps(mcp_response, indent=2)}\n```\n\n🤖 **Gemini:** {gemini_answer}"
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+    with st.chat_message("assistant"):
+        st.markdown(response_text)
