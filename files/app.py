@@ -1,45 +1,23 @@
+import asyncio
+import json
 import streamlit as st
 import requests
-import json
+from model_context_protocol.client import ClientSession
+from model_context_protocol.transport.http import HTTPClientTransport
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"   # NOTE: endpoint is /mcp
+MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 
-# Google Gemini API endpoint
+# Gemini API
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
-# ---------------- FUNCTIONS ----------------
-def query_mcp_server(method: str, params: dict = None):
-    """
-    Sends a JSON-RPC request to the MCP server (/mcp).
-    """
-    try:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": method,
-            "params": params or {}
-        }
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(MCP_SERVER_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
+# ---------------- GEMINI FUNCTION ----------------
 def ask_gemini(prompt: str):
-    """
-    Sends text to Gemini for interpretation.
-    """
     try:
         headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [
-                {"parts": [{"text": prompt}]}
-            ]
-        }
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
         response = requests.post(GEMINI_URL, headers=headers, json=data, timeout=30)
         response.raise_for_status()
         result = response.json()
@@ -47,7 +25,20 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"❌ Gemini Error: {str(e)}"
 
-# ---------------- STREAMLIT UI ----------------
+# ---------------- MCP QUERY ----------------
+async def query_mcp(method: str, params: dict = None):
+    """
+    Query MCP server using official transport.
+    """
+    try:
+        async with HTTPClientTransport(MCP_SERVER_URL) as transport:
+            async with ClientSession(transport) as session:
+                response = await session.send(method, params or {})
+                return response
+    except Exception as e:
+        return {"error": str(e)}
+
+# ---------------- STREAMLIT APP ----------------
 st.set_page_config(page_title="MasaBot – MCP + Gemini", layout="wide")
 st.title("🤖 MasaBot – MCP + Gemini Chatbot")
 st.caption(f"🔗 Connected to MCP server: `{MCP_SERVER_URL}`")
@@ -55,28 +46,25 @@ st.caption(f"🔗 Connected to MCP server: `{MCP_SERVER_URL}`")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Show chat history
+# Show history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Input box
 if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
-    # Save user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 🔎 Decide which MCP method to call
+    # Decide which method to call
     if "namespace" in prompt.lower():
-        mcp_response = query_mcp_server("kubectlGet", {"resource": "namespaces"})
+        mcp_response = asyncio.run(query_mcp("kubectlGet", {"resource": "namespaces"}))
     elif "pod" in prompt.lower():
-        mcp_response = query_mcp_server("kubectlGet", {"resource": "pods"})
+        mcp_response = asyncio.run(query_mcp("kubectlGet", {"resource": "pods"}))
     else:
-        # Default to listing available tools
-        mcp_response = query_mcp_server("listTools")
+        mcp_response = asyncio.run(query_mcp("listTools"))
 
-    # Ask Gemini to explain
+    # Ask Gemini
     gemini_prompt = (
         f"User asked: {prompt}\n\n"
         f"MCP Server Raw Response:\n{json.dumps(mcp_response, indent=2)}\n\n"
@@ -84,12 +72,11 @@ if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
     )
     gemini_answer = ask_gemini(gemini_prompt)
 
-    # Build final response
+    # Show assistant response
     response_text = (
         f"📡 **MCP Response:**\n```json\n{json.dumps(mcp_response, indent=2)}\n```\n\n"
         f"🤖 **Gemini:** {gemini_answer}"
     )
-
     st.session_state.messages.append({"role": "assistant", "content": response_text})
     with st.chat_message("assistant"):
         st.markdown(response_text)
