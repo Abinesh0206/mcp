@@ -32,7 +32,10 @@ def query_mcp(query: str):
             "model": model,
             "apiKey": api_key
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
         response = requests.post(server_url, data=json.dumps(payload), headers=headers, timeout=30)
         if response.status_code == 200:
             return response.json()
@@ -60,6 +63,7 @@ if query := st.chat_input("Type your query..."):
     if "error" in response:
         reply = f"❌ Error: {response['error']}"
     else:
+        # Some servers return {"reply": "..."} others raw JSON
         reply = response.get("reply", json.dumps(response, indent=2))
 
     st.session_state["messages"].append({"role": "assistant", "content": reply})
