@@ -44,7 +44,6 @@ spec:
             - |
               pip install --no-cache-dir -r /app/requirements.txt && \
               pip install --no-cache-dir google-generativeai && \
-              pip install --no-cache-dir git+https://github.com/modelcontextprotocol/python-sdk.git && \
               streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0
       volumes:
         - name: code
