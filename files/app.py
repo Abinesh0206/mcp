@@ -16,74 +16,49 @@ st.title("🤖 MasaBot – MCP + Gemini UI")
 # ---------------- CHAT INPUT ----------------
 query = st.text_input("💬 Ask something (Kubernetes / General):", "")
 
+
 def build_mcp_payload(query: str):
-    """ Map user query to correct MCP tool call """
+    """ Map user query to correct MCP call """
     q = query.lower()
 
-    if "namespace" in q:
+    # Diagnose flow prompt
+    if "diagnose" in q or "troubleshoot" in q:
         return {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "tools/kubectl_get",
+            "method": "prompts/get",
             "params": {
-                "resourceType": "namespaces",
-                "name": "",
-                "namespace": "",
-                "allNamespaces": True,
-                "output": "json"
+                "name": "k8s-diagnose",
+                "arguments": {
+                    "keyword": "pod",  # could extract keyword dynamically
+                    "namespace": "default"
+                }
             }
         }
-    elif "node" in q:
+
+    # List namespaces
+    elif "namespace" in q:
         return {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "tools/kubectl_get",
-            "params": {
-                "resourceType": "nodes",
-                "name": "",
-                "namespace": "",
-                "allNamespaces": True,
-                "output": "json"
-            }
-        }
-    elif "pod" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "tools/kubectl_get",
-            "params": {
-                "resourceType": "pods",
-                "name": "",
-                "namespace": "",
-                "allNamespaces": True,
-                "output": "json"
-            }
-        }
-    else:
-        return {
-            "jsonrpc": "2.0",
-            "id": "1",
-            "method": "ping",
+            "method": "prompts/list",
             "params": {}
         }
 
-def clean_sse_response(raw_text: str):
-    """ Extract JSON from SSE stream """
-    lines = [line for line in raw_text.splitlines() if line.startswith("data:")]
-    if not lines:
-        return raw_text
-    last_data = lines[-1].replace("data:", "").strip()
-    return last_data
+    # Default: just ping
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "ping",
+        "params": {}
+    }
+
 
 if st.button("Ask") and query:
     with st.spinner("Gemini thinking..."):
 
         # Step 1: Ask Gemini to interpret
-        gemini_payload = {
-            "contents": [{
-                "parts": [{"text": query}]
-            }]
-        }
+        gemini_payload = {"contents": [{"parts": [{"text": query}]}]}
         g_res = requests.post(GEMINI_URL, json=gemini_payload)
         g_json = g_res.json()
 
@@ -99,21 +74,11 @@ if st.button("Ask") and query:
         # Step 2: Build MCP payload
         mcp_payload = build_mcp_payload(query)
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
-        }
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
         try:
             m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers)
-            raw_text = m_res.text.strip()
-            clean_text = clean_sse_response(raw_text)
-
-            try:
-                m_json = json.loads(clean_text)
-            except Exception:
-                m_json = {"raw_response": raw_text}
-
+            m_json = m_res.json()
         except Exception as e:
             st.error("⚠️ MCP Server error: " + str(e))
             st.stop()
@@ -121,16 +86,3 @@ if st.button("Ask") and query:
         # Step 3: Show MCP server response
         st.write("### 📡 MCP Server Response")
         st.json(m_json)
-
-        # Step 4: Show counts (if applicable)
-        if isinstance(m_json, dict) and "result" in m_json:
-            try:
-                items = m_json["result"].get("items", [])
-                if "namespace" in query.lower():
-                    st.success(f"📦 Total namespaces: {len(items)}")
-                elif "node" in query.lower():
-                    st.success(f"🖥️ Total nodes: {len(items)}")
-                elif "pod" in query.lower():
-                    st.success(f"🐳 Total pods: {len(items)}")
-            except Exception:
-                pass
