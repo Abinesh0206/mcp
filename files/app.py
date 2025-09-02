@@ -2,8 +2,8 @@ import asyncio
 import json
 import streamlit as st
 import requests
-from mcp import ClientSession
-from mcp.transport.http import HTTPClientTransport
+from model_context_protocol.client import ClientSession
+from model_context_protocol.transport.http import HTTPClientTransport
 
 # ---------------- CONFIG ----------------
 MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
@@ -28,7 +28,7 @@ def ask_gemini(prompt: str):
 # ---------------- MCP QUERY ----------------
 async def query_mcp(method: str, params: dict = None):
     """
-    Query MCP server using official transport (not plain HTTP POST).
+    Query MCP server using official transport.
     """
     try:
         async with HTTPClientTransport(MCP_SERVER_URL) as transport:
