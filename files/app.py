@@ -3,7 +3,7 @@ import requests
 import json
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://18.234.91.216:3000"   # MCP server base URL
+MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"   # NOTE: endpoint is /mcp
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 
@@ -13,7 +13,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # ---------------- FUNCTIONS ----------------
 def query_mcp_server(method: str, params: dict = None):
     """
-    Sends a JSON-RPC request to the MCP server at root path (/).
+    Sends a JSON-RPC request to the MCP server (/mcp).
     """
     try:
         payload = {
