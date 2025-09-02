@@ -3,7 +3,7 @@ import requests
 import json
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://18.234.91.216:3000"   # your MCP server
+MCP_SERVER_URL = "http://18.234.91.216:3000"   # MCP server base URL
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 
@@ -13,7 +13,7 @@ GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_M
 # ---------------- FUNCTIONS ----------------
 def query_mcp_server(method: str, params: dict = None):
     """
-    Sends a JSON-RPC request to the MCP server.
+    Sends a JSON-RPC request to the MCP server at root path (/).
     """
     try:
         payload = {
@@ -31,7 +31,7 @@ def query_mcp_server(method: str, params: dict = None):
 
 def ask_gemini(prompt: str):
     """
-    Sends the query/response to Gemini for interpretation.
+    Sends text to Gemini for interpretation.
     """
     try:
         headers = {"Content-Type": "application/json"}
@@ -67,11 +67,13 @@ if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Example: if user asks about namespaces, call kubectlGet
+    # 🔎 Decide which MCP method to call
     if "namespace" in prompt.lower():
         mcp_response = query_mcp_server("kubectlGet", {"resource": "namespaces"})
+    elif "pod" in prompt.lower():
+        mcp_response = query_mcp_server("kubectlGet", {"resource": "pods"})
     else:
-        # default: just list tools so user can explore
+        # Default to listing available tools
         mcp_response = query_mcp_server("listTools")
 
     # Ask Gemini to explain
