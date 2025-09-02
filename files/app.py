@@ -39,7 +39,7 @@ def build_mcp_payload(query: str):
         return {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "tools/kubectl_get",
+            "method": "kubectl_get",
             "params": {
                 "resourceType": "namespaces",
                 "allNamespaces": True,
@@ -47,11 +47,23 @@ def build_mcp_payload(query: str):
             }
         }
 
+    elif "node" in q and "describe" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "kubectl_describe",
+            "params": {
+                "resourceType": "nodes",
+                "name": "",   # TODO: extract node name if provided
+                "namespace": "default"
+            }
+        }
+
     elif "node" in q:
         return {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "tools/kubectl_get",
+            "method": "kubectl_get",
             "params": {
                 "resourceType": "nodes",
                 "allNamespaces": True,
@@ -59,11 +71,35 @@ def build_mcp_payload(query: str):
             }
         }
 
+    elif "pod" in q and "logs" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "kubectl_logs",
+            "params": {
+                "name": "",   # TODO: extract pod name from query
+                "namespace": "default",
+                "tailLines": 50
+            }
+        }
+
+    elif "pod" in q and "describe" in q:
+        return {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "kubectl_describe",
+            "params": {
+                "resourceType": "pods",
+                "name": "",   # TODO: extract pod name from query
+                "namespace": "default"
+            }
+        }
+
     elif "pod" in q:
         return {
             "jsonrpc": "2.0",
             "id": "1",
-            "method": "tools/kubectl_get",
+            "method": "kubectl_get",
             "params": {
                 "resourceType": "pods",
                 "allNamespaces": True,
