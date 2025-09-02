@@ -8,7 +8,7 @@ MCP_HOST = os.getenv("MCP_HOST", "18.234.91.216")
 MCP_PORT = os.getenv("MCP_PORT", "3000")
 MCP_SERVER_URL = f"http://{MCP_HOST}:{MCP_PORT}/"   # MCP server root (not /mcp)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = "gemini-1.5-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
