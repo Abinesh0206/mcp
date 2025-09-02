@@ -5,7 +5,7 @@ import re
 import os
 
 # ---------------- CONFIG ----------------
-BASE_DIR = os.path.dirname(__files__)  # directory of this script
+BASE_DIR = os.path.dirname(__file__)  # directory of this script
 CONFIG_FILE = os.path.join(BASE_DIR, "servers.json")  # absolute path to servers.json
 
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
