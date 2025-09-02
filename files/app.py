@@ -7,148 +7,61 @@ MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
 
-# Gemini endpoint
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+# ---------------- STREAMLIT UI ----------------
+st.set_page_config(page_title="MCP Client UI", page_icon="🤖", layout="wide")
 
-st.set_page_config(page_title="MasaBot – MCP + Gemini", page_icon="🤖", layout="centered")
-st.title("🤖 MasaBot – MCP + Gemini UI")
+st.title("🤖 MCP Client UI")
+st.markdown("Chat with **MCP Server** powered by Gemini")
 
-# ---------------- CHAT INPUT ----------------
-query = st.text_input("💬 Ask something (Kubernetes / General):", "")
+# Initialize chat history in session
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
 
+# Sidebar config
+st.sidebar.header("⚙️ Configuration")
+server_url = st.sidebar.text_input("MCP Server URL", MCP_SERVER_URL)
+api_key = st.sidebar.text_input("Gemini API Key", GEMINI_API_KEY, type="password")
+model = st.sidebar.text_input("Gemini Model", GEMINI_MODEL)
 
-def build_mcp_payload(query: str):
-    """ Map user query to correct MCP call """
-    q = query.lower()
-
-    if "diagnose" in q or "troubleshoot" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "prompts/get",
-            "params": {
-                "name": "k8s-diagnose",
-                "arguments": {
-                    "keyword": "pod",   # TODO: extract dynamically
-                    "namespace": "default"
-                }
-            }
+# ---------------- FUNCTIONS ----------------
+def query_mcp(query: str):
+    """Send query to MCP server"""
+    try:
+        payload = {
+            "query": query,
+            "model": model,
+            "apiKey": api_key
         }
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(server_url, data=json.dumps(payload), headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": f"HTTP {response.status_code}: {response.text}"}
+    except Exception as e:
+        return {"error": str(e)}
 
-    elif "namespace" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "kubectl_get",
-                "arguments": {
-                    "resourceType": "namespaces",
-                    "namespace": "default",
-                    "output": "json"
-                }
-            }
-        }
+# ---------------- CHAT INTERFACE ----------------
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-    elif "node" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "kubectl_get",
-                "arguments": {
-                    "resourceType": "nodes",
-                    "namespace": "default",
-                    "output": "json"
-                }
-            }
-        }
+# Input box at bottom
+if query := st.chat_input("Type your query..."):
+    # Show user message
+    st.session_state["messages"].append({"role": "user", "content": query})
+    with st.chat_message("user"):
+        st.markdown(query)
 
-    elif "pod" in q:
-        return {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "kubectl_get",
-                "arguments": {
-                    "resourceType": "pods",
-                    "namespace": "default",
-                    "output": "json"
-                }
-            }
-        }
+    # Send query to MCP server
+    response = query_mcp(query)
 
-    return {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}
+    # Show response
+    if "error" in response:
+        reply = f"❌ Error: {response['error']}"
+    else:
+        reply = response.get("reply", json.dumps(response, indent=2))
 
-
-def clean_sse_response(raw_text: str):
-    """ Extract JSON from SSE stream if server sends 'data:' lines """
-    lines = [line for line in raw_text.splitlines() if line.startswith("data:")]
-    if not lines:
-        return raw_text
-    return lines[-1].replace("data:", "").strip()
-
-
-if st.button("Ask") and query:
-    with st.spinner("Gemini thinking..."):
-
-        # Step 1: Ask Gemini to interpret
-        gemini_payload = {"contents": [{"parts": [{"text": query}]}]}
-        g_res = requests.post(GEMINI_URL, json=gemini_payload)
-        g_json = g_res.json()
-
-        try:
-            gemini_text = g_json["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception:
-            st.error("⚠ Gemini error: " + str(g_json))
-            st.stop()
-
-        st.write("### 🤖 Gemini Interpretation")
-        st.info(gemini_text)
-
-        # Step 2: Build MCP payload
-        mcp_payload = build_mcp_payload(query)
-
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
-        }
-
-        try:
-            m_res = requests.post(MCP_SERVER_URL, json=mcp_payload, headers=headers)
-            raw_text = m_res.text.strip()
-            clean_text = clean_sse_response(raw_text)
-
-            try:
-                m_json = json.loads(clean_text)
-            except Exception:
-                m_json = {"raw_response": raw_text}
-
-        except Exception as e:
-            st.error("⚠ MCP Server error: " + str(e))
-            st.stop()
-
-        # Step 3: Show MCP server response
-        st.write("### 📡 MCP Server Response")
-        st.json(m_json)
-
-        # Step 4: Show counts if applicable
-        if isinstance(m_json, dict) and "result" in m_json:
-            try:
-                items = []
-                # MCP returns inside result.content[0].text (json string)
-                if "content" in m_json["result"]:
-                    text_data = m_json["result"]["content"][0]["text"]
-                    parsed = json.loads(text_data)
-                    items = parsed.get("items", [])
-
-                if "namespace" in query.lower():
-                    st.success(f"📦 Total namespaces: {len(items)}")
-                elif "node" in query.lower():
-                    st.success(f"🖥 Total nodes: {len(items)}")
-                elif "pod" in query.lower():
-                    st.success(f"🐳 Total pods: {len(items)}")
-            except Exception:
-                pass
+    st.session_state["messages"].append({"role": "assistant", "content": reply})
+    with st.chat_message("assistant"):
+        st.markdown(reply)
