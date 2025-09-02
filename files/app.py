@@ -1,19 +1,32 @@
 import streamlit as st
 import requests
 import json
+import re
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"   # NOTE: endpoint is /mcp
+CONFIG_FILE = "mcp_config.example.json"   # keep your config in this file
 GEMINI_API_KEY = "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4"
 GEMINI_MODEL = "gemini-1.5-flash"
-
-# Google Gemini API endpoint
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
 
+# ---------------- LOAD SERVER CONFIG ----------------
+with open(CONFIG_FILE, "r") as f:
+    CONFIG = json.load(f)
+
+SERVERS = {srv["name"]: srv for srv in CONFIG["servers"]}
+ROUTING = CONFIG["routing"]
+
 # ---------------- FUNCTIONS ----------------
-def query_mcp_server(method: str, params: dict = None):
+def route_server(prompt: str):
+    """Match prompt with regex and pick the right server."""
+    for rule in ROUTING:
+        if re.search(rule["matcher"], prompt, re.IGNORECASE):
+            return SERVERS[rule["server"]]
+    return None  # default → no match
+
+def query_mcp_server(server: dict, method: str, params: dict = None):
     """
-    Sends a JSON-RPC request to the MCP server (/mcp).
+    Sends JSON-RPC request to MCP server.
     """
     try:
         payload = {
@@ -23,23 +36,20 @@ def query_mcp_server(method: str, params: dict = None):
             "params": params or {}
         }
         headers = {"Content-Type": "application/json"}
-        response = requests.post(MCP_SERVER_URL, headers=headers, json=payload, timeout=30)
+        if "authHeader" in server:
+            # expand environment variable tokens if needed
+            headers["Authorization"] = server["authHeader"].replace("${", "").replace("}", "")
+        response = requests.post(f"{server['baseUrl']}/mcp", headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         return response.json()
     except Exception as e:
         return {"error": str(e)}
 
 def ask_gemini(prompt: str):
-    """
-    Sends text to Gemini for interpretation.
-    """
+    """Send text to Gemini API for interpretation."""
     try:
         headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [
-                {"parts": [{"text": prompt}]}
-            ]
-        }
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
         response = requests.post(GEMINI_URL, headers=headers, json=data, timeout=30)
         response.raise_for_status()
         result = response.json()
@@ -50,7 +60,7 @@ def ask_gemini(prompt: str):
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MasaBot – MCP + Gemini", layout="wide")
 st.title("🤖 MasaBot – MCP + Gemini Chatbot")
-st.caption(f"🔗 Connected to MCP server: `{MCP_SERVER_URL}`")
+st.caption("🔗 Multi-Server MCP Client with Gemini")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -61,20 +71,24 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 # Input box
-if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
+if prompt := st.chat_input("Ask something (Kubernetes / Jenkins / ArgoCD)..."):
     # Save user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 🔎 Decide which MCP method to call
-    if "namespace" in prompt.lower():
-        mcp_response = query_mcp_server("kubectlGet", {"resource": "namespaces"})
-    elif "pod" in prompt.lower():
-        mcp_response = query_mcp_server("kubectlGet", {"resource": "pods"})
+    # Decide server based on routing rules
+    server = route_server(prompt)
+    if server:
+        # Example default method handling
+        if "namespace" in prompt.lower():
+            mcp_response = query_mcp_server(server, "kubectlGet", {"resource": "namespaces"})
+        elif "pod" in prompt.lower():
+            mcp_response = query_mcp_server(server, "kubectlGet", {"resource": "pods"})
+        else:
+            mcp_response = query_mcp_server(server, "listTools")
     else:
-        # Default to listing available tools
-        mcp_response = query_mcp_server("listTools")
+        mcp_response = {"error": "No matching server found for this query."}
 
     # Ask Gemini to explain
     gemini_prompt = (
@@ -84,9 +98,10 @@ if prompt := st.chat_input("Ask something (Kubernetes / General)..."):
     )
     gemini_answer = ask_gemini(gemini_prompt)
 
-    # Build final response
+    # Final response
     response_text = (
-        f"📡 **MCP Response:**\n```json\n{json.dumps(mcp_response, indent=2)}\n```\n\n"
+        f"📡 **MCP Response from {server['name'] if server else 'Unknown'}:**\n"
+        f"```json\n{json.dumps(mcp_response, indent=2)}\n```\n\n"
         f"🤖 **Gemini:** {gemini_answer}"
     )
 
