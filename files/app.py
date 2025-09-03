@@ -32,11 +32,11 @@ def call_mcp(method, params=None):
             return json.loads(line[6:])
     raise Exception("Invalid MCP response: " + text)
 
-# ---------------- DISCOVER METHODS ----------------
-def list_methods():
+# ---------------- DISCOVER TOOLS ----------------
+def list_tools():
     try:
         resp = call_mcp("rpc.discover")
-        return [m["name"] for m in resp.get("result", {}).get("methods", [])]
+        return [t["name"] for t in resp.get("result", {}).get("tools", [])]
     except Exception as e:
         return []
 
@@ -44,24 +44,29 @@ def list_methods():
 def ask_cluster(question):
     q = question.lower().strip()
 
-    # Special case: ask MCP directly for methods
-    if q in ["list methods", "list method", "methods", "show methods"]:
+    # Special case: list tools
+    if q in ["list methods", "list method", "methods", "show methods", "list tools"]:
         try:
             mcp_resp = call_mcp("rpc.discover")
-            return f"🛠 Available methods:\n```\n{json.dumps(mcp_resp.get('result', mcp_resp), indent=2)}\n```"
+            return f"🛠 Available tools:\n```\n{json.dumps(mcp_resp.get('result', mcp_resp), indent=2)}\n```"
         except Exception as e:
             return f"⚠ MCP discover failed: {str(e)}"
 
+    # Discover tools first
+    tools = list_tools()
+    if not tools:
+        return "⚠ No tools discovered from MCP server."
+
     mapping_prompt = f"""
-    You are helping map user questions to MCP server methods.
+    You are helping map user questions to MCP server tool calls.
 
-    MCP server supports these methods: {methods}
+    MCP server supports these tools: {tools}
 
-    Convert this question into a valid MCP call JSON ONLY.
-    Do not include code fences, markdown, or explanations.
-
-    Example:
-    {{"method": "{methods[0]}", "params": {{}}}}
+    Convert this question into a valid JSON ONLY in the following format:
+    {{
+      "name": "<tool_name>",
+      "arguments": {{}}
+    }}
 
     Q: "{question}"
     """
@@ -74,12 +79,13 @@ def ask_cluster(question):
     try:
         mapping = json.loads(mapping_text)
     except Exception:
-        return f"⚠ Could not map your question to an MCP call. Gemini said: {mapping_text}"
+        return f"⚠ Could not map your question to a tool call. Gemini said: {mapping_text}"
 
+    # Call MCP tool
     try:
-        mcp_resp = call_mcp(mapping["method"], mapping.get("params", {}))
+        mcp_resp = call_mcp("tools/call", {"name": mapping["name"], "arguments": mapping.get("arguments", {})})
     except Exception as e:
-        return f"⚠ MCP call failed: {mapping['method']} not available. {str(e)}"
+        return f"⚠ MCP tool call failed: {mapping['name']}. {str(e)}"
 
     summary_prompt = f"""
     Summarize this JSON as a human-readable answer:
@@ -88,7 +94,6 @@ def ask_cluster(question):
     """
     summary_resp = model.generate_content(summary_prompt)
     return summary_resp.text
-
 # ---------------- NORMAL CHAT ----------------
 def ask_normal(question):
     resp = model.generate_content(question)
