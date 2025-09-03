@@ -23,7 +23,10 @@ def call_mcp(method, params=None):
         "method": method,
         "params": params or {},
     }
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
+    }
     resp = requests.post(MCP_SERVER_URL, headers=headers, json=payload)
 
     text = resp.text
@@ -83,7 +86,10 @@ def ask_cluster(question):
 
     # Call MCP tool
     try:
-        mcp_resp = call_mcp("tools/call", {"name": mapping["name"], "arguments": mapping.get("arguments", {})})
+        mcp_resp = call_mcp("tools/call", {
+            "name": mapping["name"],
+            "arguments": mapping.get("arguments", {})
+        })
     except Exception as e:
         return f"⚠ MCP tool call failed: {mapping['name']}. {str(e)}"
 
@@ -94,6 +100,7 @@ def ask_cluster(question):
     """
     summary_resp = model.generate_content(summary_prompt)
     return summary_resp.text
+
 # ---------------- NORMAL CHAT ----------------
 def ask_normal(question):
     resp = model.generate_content(question)
