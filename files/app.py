@@ -17,7 +17,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_MODEL)
 
-# Function to call MCP
+# ---------------- MCP CALL ----------------
 def call_mcp(method, params=None):
     payload = {
         "jsonrpc": "2.0",
@@ -38,13 +38,14 @@ def call_mcp(method, params=None):
             return json.loads(line[6:])
     raise Exception("Invalid MCP response: " + text)
 
-# Function: NL → MCP → Summary
+# ---------------- ASK CLUSTER ----------------
 def ask_cluster(question):
     mapping_prompt = f"""
-    Convert this question into MCP call JSON.
+    Convert this question into a valid MCP call JSON ONLY.
+    Do not include code fences, markdown, or explanations.
     Available method: "kubectl_get" with params {{resourceType, namespace?}}.
 
-    Example output:
+    Example:
     {{"method": "kubectl_get", "params": {{"resourceType": "pods"}}}}
 
     Q: "{question}"
@@ -52,13 +53,22 @@ def ask_cluster(question):
     mapping_resp = model.generate_content(mapping_prompt)
     mapping_text = mapping_resp.text.strip()
 
+    # Clean output (remove ```json ... ```)
+    if mapping_text.startswith("```"):
+        mapping_text = mapping_text.strip("`").replace("json", "", 1).strip()
+
     try:
         mapping = json.loads(mapping_text)
-    except:
-        raise Exception("Gemini mapping not JSON: " + mapping_text)
+    except Exception:
+        return f"⚠ Could not map your question to an MCP call. Gemini said: {mapping_text}"
 
-    mcp_resp = call_mcp(mapping["method"], mapping.get("params", {}))
+    # Call MCP
+    try:
+        mcp_resp = call_mcp(mapping["method"], mapping.get("params", {}))
+    except Exception as e:
+        return f"⚠ MCP call failed: {str(e)}"
 
+    # Summarize result
     summary_prompt = f"""
     Summarize this JSON as a human-readable answer:
     Q: {question}
