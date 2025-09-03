@@ -43,6 +43,7 @@ mcp:
     - name: ARGOCD_MCP_TOKEN
 
 ollama:
+  enabled: false
   image:
     repository: ollama/ollama
     tag: "latest"
