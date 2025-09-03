@@ -42,12 +42,13 @@ def list_methods():
 
 # ---------------- ASK CLUSTER ----------------
 def ask_cluster(question):
-    methods = list_methods()
-    if not methods:
-        return "⚠ No methods discovered from MCP server."
-
+    # Special case: show available methods
     if question.lower().strip() == "list methods":
-        return f"Available MCP methods: {methods}"
+        try:
+            methods = call_mcp("rpc.discover")
+            return "### Available MCP methods:\n```json\n" + json.dumps(methods, indent=2) + "\n```"
+        except Exception as e:
+            return f"⚠ Failed to discover methods: {str(e)}"
 
     mapping_prompt = f"""
     You are helping map user questions to MCP server methods.
