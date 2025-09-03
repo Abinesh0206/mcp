@@ -25,7 +25,8 @@ def call_mcp(method, params=None):
     }
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
+        "Accept": "application/json, text/event-stream",
+        "Authorization": f"Bearer {os.getenv('K8S_MCP_TOKEN')}"  # 🔑 Added
     }
     resp = requests.post(MCP_SERVER_URL, headers=headers, json=payload)
 
