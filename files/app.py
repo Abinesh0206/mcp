@@ -8,7 +8,7 @@ import google.generativeai as genai
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://18.234.91.216:3000/mcp")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
@@ -23,33 +23,42 @@ def call_mcp(method, params=None):
         "method": method,
         "params": params or {},
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     resp = requests.post(MCP_SERVER_URL, headers=headers, json=payload)
-    text = resp.text
 
+    text = resp.text
     for line in text.splitlines():
         if line.startswith("data: "):
             return json.loads(line[6:])
     raise Exception("Invalid MCP response: " + text)
 
+# ---------------- DISCOVER METHODS ----------------
+def list_methods():
+    try:
+        resp = call_mcp("rpc.discover")
+        return [m["name"] for m in resp.get("result", {}).get("methods", [])]
+    except Exception as e:
+        return []
+
 # ---------------- ASK CLUSTER ----------------
 def ask_cluster(question):
+    methods = list_methods()
+    if not methods:
+        return "⚠ No methods discovered from MCP server."
+
     if question.lower().strip() == "list methods":
-        try:
-            return json.dumps(call_mcp("rpc.discover"), indent=2)
-        except Exception as e:
-            return f"⚠ Failed to discover methods: {str(e)}"
+        return f"Available MCP methods: {methods}"
 
     mapping_prompt = f"""
+    You are helping map user questions to MCP server methods.
+
+    MCP server supports these methods: {methods}
+
     Convert this question into a valid MCP call JSON ONLY.
     Do not include code fences, markdown, or explanations.
 
-    Available method: "kubectl_get" with params {{resourceType, namespace?}}.
     Example:
-    {{"method": "kubectl_get", "params": {{"resourceType": "pods"}}}}
+    {{"method": "{methods[0]}", "params": {{}}}}
 
     Q: "{question}"
     """
@@ -87,12 +96,11 @@ def ask(question):
     cluster_keywords = ["kubernetes", "cluster", "pod", "node", "namespace", "service", "deployment"]
     if any(word in question.lower() for word in cluster_keywords):
         return ask_cluster(question)
-    else:
-        return ask_normal(question)
+    return ask_normal(question)
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="K8s Chat", page_icon="☁", layout="wide")
-st.title("☁ Kubernetes Chat Assistant")
+st.title("☁ MASA Bot")
 
 if "history" not in st.session_state:
     st.session_state.history = []
