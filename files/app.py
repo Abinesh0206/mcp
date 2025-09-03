@@ -1,88 +1,97 @@
-import streamlit as st
-import requests
-import uuid
+import os
 import json
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+import google.generativeai as genai
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://13.221.252.52:3000/mcp"
+load_dotenv()
 
-# ---------------- STREAMLIT UI ----------------
-st.set_page_config(page_title="MCP Client UI", page_icon="🤖", layout="wide")
+# Environment variables (with defaults if missing)
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://18.234.91.216:3000/mcp")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-st.title("🤖 MCP Client UI")
-st.markdown("Chat with **MCP Server** (JSON-RPC 2.0 + call_tool)")
+# Gemini config
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel(GEMINI_MODEL)
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
-
-# ---------------- FUNCTIONS ----------------
-def call_tool(tool_name: str, arguments: dict):
-    """Send JSON-RPC request to MCP server using call_tool"""
+# Function to call MCP
+def call_mcp(method, params=None):
     payload = {
         "jsonrpc": "2.0",
-        "id": str(uuid.uuid4()),
-        "method": "call_tool",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments
-        }
+        "id": 1,
+        "method": method,
+        "params": params or {},
     }
     headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream"
+        "Accept": "application/json, text/event-stream",
     }
+    resp = requests.post(MCP_SERVER_URL, headers=headers, json=payload)
+    text = resp.text
+
+    # Extract "data: {}"
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    raise Exception("Invalid MCP response: " + text)
+
+# Function: NL → MCP → Summary
+def ask_cluster(question):
+    mapping_prompt = f"""
+    Convert this question into MCP call JSON.
+    Available method: "kubectl_get" with params {{resourceType, namespace?}}.
+
+    Example output:
+    {{"method": "kubectl_get", "params": {{"resourceType": "pods"}}}}
+
+    Q: "{question}"
+    """
+    mapping_resp = model.generate_content(mapping_prompt)
+    mapping_text = mapping_resp.text.strip()
 
     try:
-        response = requests.post(
-            MCP_SERVER_URL,
-            data=json.dumps(payload),
-            headers=headers,
-            timeout=30
-        )
+        mapping = json.loads(mapping_text)
+    except:
+        raise Exception("Gemini mapping not JSON: " + mapping_text)
 
-        if response.status_code != 200:
-            return {"error": f"HTTP {response.status_code}: {response.text}"}
+    mcp_resp = call_mcp(mapping["method"], mapping.get("params", {}))
 
-        try:
-            return response.json()
-        except Exception:
-            return {"raw": response.text}
+    summary_prompt = f"""
+    Summarize this JSON as a human-readable answer:
+    Q: {question}
+    JSON: {json.dumps(mcp_resp.get("result", mcp_resp))}
+    """
+    summary_resp = model.generate_content(summary_prompt)
+    return summary_resp.text
 
-    except Exception as e:
-        return {"error": str(e)}
+# ---------------- STREAMLIT UI ----------------
+st.set_page_config(page_title="K8s Chat", page_icon="☁", layout="wide")
 
-# ---------------- CHAT UI ----------------
-for msg in st.session_state["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+st.title("☁ Kubernetes Chat Assistant")
 
-# Input fields
-tool_name = st.text_input("Tool name (e.g., kubectl_get, namespace_list)")
-arguments_text = st.text_area("Arguments (JSON)", value='{"resource": "pods", "namespace": "default"}')
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-if st.button("Run Tool"):
-    try:
-        arguments = json.loads(arguments_text)
-    except Exception as e:
-        st.error(f"Invalid JSON in arguments: {e}")
-        arguments = {}
+# Chat UI
+for msg in st.session_state.history:
+    role, text = msg
+    with st.chat_message(role):
+        st.markdown(text)
 
-    st.session_state["messages"].append({"role": "user", "content": f"{tool_name} {arguments}"})
+# Input box
+if question := st.chat_input("Ask about your cluster..."):
+    st.session_state.history.append(("user", question))
     with st.chat_message("user"):
-        st.markdown(f"**{tool_name}** with args: `{arguments}`")
+        st.markdown(question)
 
-    response = call_tool(tool_name, arguments)
+    try:
+        answer = ask_cluster(question)
+    except Exception as e:
+        answer = f"⚠ {str(e)}"
 
-    if "error" in response:
-        reply = f"❌ Error: {response['error']}"
-    elif "result" in response:
-        reply = f"✅ Result: {json.dumps(response['result'], indent=2)}"
-    elif "raw" in response:
-        reply = f"📡 Raw response:\n\n```\n{response['raw']}\n```"
-    else:
-        reply = json.dumps(response, indent=2)
-
-    st.session_state["messages"].append({"role": "assistant", "content": reply})
+    st.session_state.history.append(("assistant", answer))
     with st.chat_message("assistant"):
-        st.markdown(reply)
+        st.markdown(answer)
