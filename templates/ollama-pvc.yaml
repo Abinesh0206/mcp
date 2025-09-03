@@ -1,3 +1,4 @@
+{{- if .Values.ollama.enabled }}
 {{- if .Values.ollama.pvc.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -11,4 +12,5 @@ spec:
   {{- if .Values.ollama.pvc.storageClassName }}
   storageClassName: {{ .Values.ollama.pvc.storageClassName }}
   {{- end }}
+{{- end }}
 {{- end }}
