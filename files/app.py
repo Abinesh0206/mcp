@@ -4,7 +4,7 @@ import uuid
 import json
 
 # ---------------- CONFIG ----------------
-MCP_SERVER_URL = "http://18.234.91.216:3000/mcp"
+MCP_SERVER_URL = "http://13.221.252.52:3000/mcp"
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="🤖", layout="wide")
