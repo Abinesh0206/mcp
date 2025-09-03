@@ -9,7 +9,7 @@ import google.generativeai as genai
 load_dotenv()
 
 # Environment variables (with defaults if missing)
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://18.234.91.216:3000/mcp")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
@@ -40,11 +40,18 @@ def call_mcp(method, params=None):
 
 # ---------------- ASK CLUSTER ----------------
 def ask_cluster(question):
+    # Special case: list available methods
+    if question.lower().strip() == "list methods":
+        try:
+            return json.dumps(call_mcp("rpc.discover"), indent=2)
+        except Exception as e:
+            return f"⚠ Failed to discover methods: {str(e)}"
+
     mapping_prompt = f"""
     Convert this question into a valid MCP call JSON ONLY.
     Do not include code fences, markdown, or explanations.
-    Available method: "kubectl_get" with params {{resourceType, namespace?}}.
 
+    Available method: "kubectl_get" with params {{resourceType, namespace?}}.
     Example:
     {{"method": "kubectl_get", "params": {{"resourceType": "pods"}}}}
 
@@ -66,7 +73,7 @@ def ask_cluster(question):
     try:
         mcp_resp = call_mcp(mapping["method"], mapping.get("params", {}))
     except Exception as e:
-        return f"⚠ MCP call failed: {str(e)}"
+        return f"⚠ MCP call failed: {mapping['method']} not available. {str(e)}"
 
     # Summarize result
     summary_prompt = f"""
