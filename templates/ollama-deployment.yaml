@@ -3,11 +3,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ollama
-  namespace: masabot
+  namespace: {{ .Release.Namespace }}
   labels:
     app: ollama
 spec:
-  replicas: 1
+  replicas: {{ .Values.ollama.replicas }}
   selector:
     matchLabels:
       app: ollama
@@ -18,38 +18,37 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: ollama/ollama:latest
-          imagePullPolicy: IfNotPresent
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
           ports:
-            - containerPort: 11434
+            - containerPort: {{ .Values.ollama.service.port }}
           resources:
             requests:
-              cpu: "2"
-              memory: "8Gi"
+              cpu: {{ .Values.ollama.resources.requests.cpu }}
+              memory: {{ .Values.ollama.resources.requests.memory }}
             limits:
-              cpu: "4"
-              memory: "16Gi"
+              cpu: {{ .Values.ollama.resources.limits.cpu }}
+              memory: {{ .Values.ollama.resources.limits.memory }}
           volumeMounts:
             - name: ollama-data
               mountPath: /root/.ollama
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # Start ollama server in background
               ollama serve &
               sleep 5
-              echo "⚡ Preloading model mistral:7b-instruct-v0.2-q4_0 ..."
-              ollama pull mistral:7b-instruct-v0.2-q4_0 || true
-              # Warm-up run so model is cached
-              ollama run mistral:7b-instruct-v0.2-q4_0 --prompt "Hello" || true
+              echo "⚡ Preloading model {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} ..."
+              ollama pull {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} || true
+              ollama run {{ .Values.ollama.model.name }}:{{ .Values.ollama.model.tag }} --prompt "Hello" || true
               wait
           readinessProbe:
             httpGet:
               path: /api/tags
-              port: 11434
+              port: {{ .Values.ollama.service.port }}
             initialDelaySeconds: 30
             periodSeconds: 10
       volumes:
         - name: ollama-data
           persistentVolumeClaim:
             claimName: ollama-data
+{{- end }}
