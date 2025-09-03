@@ -42,11 +42,13 @@ def list_methods():
 
 # ---------------- ASK CLUSTER ----------------
 def ask_cluster(question):
-    # Special case: list methods
-    if question.lower().strip() in ["list methods", "methods", "show methods"]:
+    q = question.lower().strip()
+
+    # Special case: ask MCP directly for methods
+    if q in ["list methods", "list method", "methods", "show methods"]:
         try:
             mcp_resp = call_mcp("rpc.discover")
-            return f"🛠 Available methods:\n```\n{json.dumps(mcp_resp, indent=2)}\n```"
+            return f"🛠 Available methods:\n```\n{json.dumps(mcp_resp.get('result', mcp_resp), indent=2)}\n```"
         except Exception as e:
             return f"⚠ MCP discover failed: {str(e)}"
 
