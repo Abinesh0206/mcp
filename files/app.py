@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import streamlit as st
+import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
 
@@ -61,44 +62,39 @@ def call_tool(name: str, arguments: dict):
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
-def parse_mcp_response(response: dict) -> str:
-    """Convert MCP server response into natural language."""
+def parse_mcp_response(response: dict):
+    """Convert MCP server response into nice Streamlit output."""
     if "error" in response:
-        return f"❌ Error: {response['error']}"
+        st.error(f"❌ Error: {response['error']}")
+        return
 
-    # Handle tool-style responses
     result = response.get("result", {})
 
-    # Case 1: Standard text content (YAML/describe)
+    # Case 1: Standard text (describe, helm logs, etc.)
     content = result.get("content", [])
     if isinstance(content, list) and len(content) > 0:
         text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
         if text_blocks:
-            return "\n".join(text_blocks).strip()
+            st.code("\n".join(text_blocks).strip(), language="yaml")
+            return
 
-    # Case 2: List responses (e.g., get pods/namespaces)
+    # Case 2: List responses (pods, namespaces, deployments, etc.)
     if "items" in result:
         items = result.get("items", [])
         if not items:
-            return "ℹ️ No resources found in the cluster."
+            st.info("ℹ️ No resources found in the cluster.")
+            return
 
-        # Detect resource type
-        kind = items[0].get("kind", "Resource")
-        lines = []
-        for item in items:
-            name = item.get("name", "")
-            ns = item.get("namespace", "")
-            status = item.get("status", "")
-            created = item.get("createdAt", "")
-            if ns:
-                lines.append(f"- {kind} **{name}** in namespace `{ns}` → {status} (created at {created})")
-            else:
-                lines.append(f"- {kind} **{name}** → {status} (created at {created})")
-
-        return f"📋 Found {len(items)} {kind.lower()}(s):\n" + "\n".join(lines)
+        df = pd.DataFrame(items)
+        # Keep useful columns only if exist
+        useful_cols = [col for col in ["name", "namespace", "kind", "status", "createdAt"] if col in df.columns]
+        if useful_cols:
+            df = df[useful_cols]
+        st.dataframe(df, use_container_width=True)
+        return
 
     # Case 3: Unknown
-    return "⚠️ No usable response from MCP server."
+    st.warning("⚠️ No usable response from MCP server.")
 
 
 def ask_gemini(prompt: str):
@@ -125,7 +121,7 @@ def sanitize_args(args: dict):
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
 
-    # If "all" was given → map to "all-namespaces"
+    # If "all" was given → map to "allNamespaces"
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
@@ -211,7 +207,7 @@ if st.button("Run Query"):
             response = call_tool(decision["tool"], decision["args"])
 
             st.subheader("📡 MCP Server Response")
-            st.markdown(parse_mcp_response(response))   # ✅ Natural language instead of JSON
+            parse_mcp_response(response)  # ✅ Table or formatted text
         else:
             st.subheader("💡 Gemini Direct Answer")
             st.markdown(ask_gemini(user_query))
