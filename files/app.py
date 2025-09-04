@@ -62,15 +62,42 @@ def call_tool(name: str, arguments: dict):
 
 
 def parse_mcp_response(response: dict) -> str:
-    """Extract plain text from MCP server response."""
+    """Convert MCP server response into natural language."""
     if "error" in response:
         return f"❌ Error: {response['error']}"
 
+    # Handle tool-style responses
     result = response.get("result", {})
+
+    # Case 1: Standard text content (YAML/describe)
     content = result.get("content", [])
     if isinstance(content, list) and len(content) > 0:
         text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
-        return "\n".join(text_blocks).strip() or "✅ Done (no extra output)."
+        if text_blocks:
+            return "\n".join(text_blocks).strip()
+
+    # Case 2: List responses (e.g., get pods/namespaces)
+    if "items" in result:
+        items = result.get("items", [])
+        if not items:
+            return "ℹ️ No resources found in the cluster."
+
+        # Detect resource type
+        kind = items[0].get("kind", "Resource")
+        lines = []
+        for item in items:
+            name = item.get("name", "")
+            ns = item.get("namespace", "")
+            status = item.get("status", "")
+            created = item.get("createdAt", "")
+            if ns:
+                lines.append(f"- {kind} **{name}** in namespace `{ns}` → {status} (created at {created})")
+            else:
+                lines.append(f"- {kind} **{name}** → {status} (created at {created})")
+
+        return f"📋 Found {len(items)} {kind.lower()}(s):\n" + "\n".join(lines)
+
+    # Case 3: Unknown
     return "⚠️ No usable response from MCP server."
 
 
@@ -98,6 +125,11 @@ def sanitize_args(args: dict):
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
 
+    # If "all" was given → map to "all-namespaces"
+    if fixed.get("namespace") == "all":
+        fixed["allNamespaces"] = True
+        fixed.pop("namespace", None)
+
     return fixed
 
 
@@ -121,6 +153,7 @@ Respond ONLY in strict JSON with this structure, no extra text:
 Important:
 - Use key `resourceType` (not `resource`).
 - Add `namespace` if required (e.g., for pods, deployments).
+- Use "allNamespaces": true if query refers to "all namespaces".
 """
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -178,7 +211,7 @@ if st.button("Run Query"):
             response = call_tool(decision["tool"], decision["args"])
 
             st.subheader("📡 MCP Server Response")
-            st.text(parse_mcp_response(response))   # ✅ Show plain text instead of raw JSON
+            st.markdown(parse_mcp_response(response))   # ✅ Natural language instead of JSON
         else:
             st.subheader("💡 Gemini Direct Answer")
             st.markdown(ask_gemini(user_query))
