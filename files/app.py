@@ -17,6 +17,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
+    """Send a JSON-RPC request to the MCP server."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -45,17 +46,20 @@ def call_mcp_server(method: str, params: dict = None):
         return {"error": f"MCP server request failed: {str(e)}"}
 
 def list_mcp_tools():
+    """Fetch list of available MCP tools."""
     resp = call_mcp_server("tools/list")
     if "result" in resp and isinstance(resp["result"], dict):
         return resp["result"].get("tools", [])
     return []
 
 def call_tool(name: str, arguments: dict):
+    """Execute a specific MCP tool with arguments."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 def ask_gemini(prompt: str):
+    """Send a free-text query to Gemini and return its response."""
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(prompt)
@@ -63,97 +67,38 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"Gemini error: {str(e)}"
 
-# ---------------- QUERY INTERPRETER ----------------
-def interpret_query(query: str):
+def ask_gemini_for_tool_decision(query: str):
     """
-    Map user query → MCP tool & arguments
+    Ask Gemini whether the query needs MCP tool execution.
+    Gemini should return JSON with fields:
+    - tool: (string or null)
+    - args: (object or null)
+    - explanation: (string)
     """
-    query_lower = query.lower().strip()
-    if not query_lower:
-        return {"tool": None, "args": None}
+    instruction = f"""
+You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
 
-    words = query_lower.split()
+Query: "{query}"
 
-    # ---- CREATE ----
-    if query_lower.startswith("create namespace"):
-        name = words[-1]
-        return {"tool": "kubectl_create", "args": {"resourceType": "namespace", "name": name}}
-
-    if query_lower.startswith("create pod"):
-        name = words[-1]
-        return {"tool": "kubectl_create", "args": {"resourceType": "pod", "name": name, "namespace": "default"}}
-
-    # ---- DELETE ----
-    if query_lower.startswith("delete namespace"):
-        name = words[-1]
-        return {"tool": "kubectl_delete", "args": {"resourceType": "namespace", "name": name}}
-
-    if query_lower.startswith("delete pod"):
-        name = words[-1]
-        return {"tool": "kubectl_delete", "args": {"resourceType": "pod", "name": name, "namespace": "default"}}
-
-    # ---- DESCRIBE ----
-    if "describe" in query_lower and "pod" in query_lower:
-        try:
-            pod_index = words.index("pod")
-            name = words[pod_index + 1]
-        except Exception:
-            name = ""
-        namespace = "default"
-        if " in " in query_lower:
-            namespace = query_lower.split(" in ")[-1].strip()
-        return {"tool": "kubectl_describe", "args": {"resourceType": "pod", "name": name, "namespace": namespace}}
-
-    # ---- GET ----
-    if "namespaces" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "namespaces"}}
-
-    if "pods" in query_lower:
-        namespace = "default"
-        if " in " in query_lower:
-            namespace = query_lower.split(" in ")[-1].strip()
-        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "namespace": namespace}}
-
-    if "services" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "services", "namespace": "default"}}
-
-    if "deployments" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "deployments", "namespace": "default"}}
-
-    # ---- HELM ----
-    if "install harbor" in query_lower or "install helm chart" in query_lower:
-        # Example default Harbor install
-        return {
-            "tool": "install_helm_chart",
-            "args": {
-                "name": "my-harbor",
-                "chart": "harbor/harbor",
-                "repo": "https://helm.goharbor.io",
-                "namespace": "harbor",
-                "values": {
-                    "expose": {
-                        "type": "nodePort",
-                        "tls": {"enabled": False},
-                        "nodePort": {
-                            "http": {"port": 30002},
-                            "https": {"port": 30003},
-                            "notary": {"port": 30004}
-                        }
-                    },
-                    "externalURL": "http://127.0.0.1:30002",
-                    "harborAdminPassword": "Harbor12345"
-                }
-            }
-        }
-
-    # ---- FALLBACK → GEMINI ----
-    return {"tool": None, "args": None}
+Respond ONLY in JSON with this structure:
+{{
+  "tool": "kubectl_get" | "kubectl_create" | "kubectl_delete" | "kubectl_describe" | "install_helm_chart" | null,
+  "args": {{...}} or null,
+  "explanation": "Short explanation in plain English"
+}}
+"""
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(instruction)
+        return json.loads(response.text)
+    except Exception as e:
+        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="⚡", layout="wide")
 st.title("🤖 MCP Client – Kubernetes Assistant")
 
-# Sidebar
+# Sidebar with available tools
 tools = list_mcp_tools()
 if tools:
     st.sidebar.subheader("🔧 Available MCP Tools")
@@ -170,8 +115,12 @@ if st.button("Run Query"):
     if not user_query.strip():
         st.warning("Please enter a query first.")
     else:
-        with st.spinner("🤖 Processing query..."):
-            decision = interpret_query(user_query)
+        with st.spinner("🤖 Gemini is thinking..."):
+            decision = ask_gemini_for_tool_decision(user_query)
+
+        # Show Gemini’s explanation first
+        st.subheader("💡 Gemini Explanation")
+        st.markdown(decision.get("explanation", ""))
 
         if decision["tool"]:
             st.info(f"🔧 Executing MCP tool: `{decision['tool']}` with arguments: {decision['args']}")
@@ -181,10 +130,6 @@ if st.button("Run Query"):
                 st.error(f"Error from MCP server: {response['error']}")
             else:
                 st.json(response)
-
-            gemini_prompt = f"Explain this Kubernetes/Helm action: {user_query}"
-            st.subheader("💡 Gemini Explanation")
-            st.markdown(ask_gemini(gemini_prompt))
         else:
-            st.subheader("💡 Gemini Answer")
+            st.subheader("💡 Gemini Direct Answer")
             st.markdown(ask_gemini(user_query))
