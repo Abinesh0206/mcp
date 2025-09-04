@@ -61,6 +61,19 @@ def call_tool(name: str, arguments: dict):
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
+def parse_mcp_response(response: dict) -> str:
+    """Extract plain text from MCP server response."""
+    if "error" in response:
+        return f"❌ Error: {response['error']}"
+
+    result = response.get("result", {})
+    content = result.get("content", [])
+    if isinstance(content, list) and len(content) > 0:
+        text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
+        return "\n".join(text_blocks).strip() or "✅ Done (no extra output)."
+    return "⚠️ No usable response from MCP server."
+
+
 def ask_gemini(prompt: str):
     """Send a free-text query to Gemini and return its response."""
     try:
@@ -163,11 +176,9 @@ if st.button("Run Query"):
         if decision["tool"]:
             st.info(f"🔧 Executing MCP tool: `{decision['tool']}` with arguments: {decision['args']}")
             response = call_tool(decision["tool"], decision["args"])
+
             st.subheader("📡 MCP Server Response")
-            if "error" in response:
-                st.error(f"Error from MCP server: {response['error']}")
-            else:
-                st.json(response)
+            st.text(parse_mcp_response(response))   # ✅ Show plain text instead of raw JSON
         else:
             st.subheader("💡 Gemini Direct Answer")
             st.markdown(ask_gemini(user_query))
