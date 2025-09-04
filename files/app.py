@@ -27,8 +27,24 @@ def call_mcp_server(method: str, params: dict = None):
         "params": params or {}
     }
     try:
-        res = requests.post(MCP_SERVER_URL, json=payload, timeout=60)
+        res = requests.post(
+            MCP_SERVER_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"
+            },
+            json=payload,
+            timeout=60
+        )
         res.raise_for_status()
+
+        # Some MCP servers stream events → split by lines
+        text = res.text.strip()
+        if text.startswith("event:"):
+            # Extract last "data:" block
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    return json.loads(line[len("data:"):].strip())
         return res.json()
     except Exception as e:
         return {"error": str(e)}
@@ -37,10 +53,20 @@ def list_mcp_tools():
     """
     Get available tools from MCP server.
     """
-    resp = call_mcp_server("list_tools")
+    resp = call_mcp_server("tools/list")
     if "result" in resp:
         return resp["result"].get("tools", [])
     return []
+
+def call_tool(name: str, arguments: dict):
+    """
+    Call a specific MCP tool.
+    """
+    resp = call_mcp_server("tools/call", {
+        "name": name,
+        "arguments": arguments
+    })
+    return resp
 
 def ask_gemini(prompt: str):
     """
@@ -75,7 +101,7 @@ tools = list_mcp_tools()
 if tools:
     st.sidebar.subheader("🔧 Available MCP Tools")
     for t in tools:
-        st.sidebar.write(f"- {t}")
+        st.sidebar.write(f"- {t['name']}: {t.get('description','')}")
 else:
     st.sidebar.write("⚠️ Could not fetch tools from MCP server.")
 
@@ -96,10 +122,7 @@ if st.button("Run"):
 
         if decision["tool"]:  # If mapped to tool
             st.write(f"🔧 Calling MCP tool: `{decision['tool']}` with args: {decision['args']}")
-            response = call_mcp_server("call_tool", {
-                "name": decision["tool"],
-                "arguments": decision["args"]
-            })
+            response = call_tool(decision["tool"], decision["args"])
             st.subheader("📡 MCP Server Response:")
             st.json(response)
         else:  # General Q → Gemini direct answer
