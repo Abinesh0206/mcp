@@ -71,10 +71,27 @@ def ask_gemini(prompt: str):
         return f"Gemini error: {str(e)}"
 
 
+def sanitize_args(args: dict):
+    """Fix Gemini argument naming mismatches for MCP server."""
+    if not args:
+        return {}
+    fixed = args.copy()
+
+    # Normalize key names
+    if "resource" in fixed and "resourceType" not in fixed:
+        fixed["resourceType"] = fixed.pop("resource")
+
+    # Ensure namespace is set if required
+    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
+        fixed["namespace"] = "default"
+
+    return fixed
+
+
 def ask_gemini_for_tool_decision(query: str):
     """
     Ask Gemini whether the query needs MCP tool execution.
-    Always enforce JSON output.
+    Always enforce JSON output with correct argument names.
     """
     instruction = f"""
 You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
@@ -87,6 +104,10 @@ Respond ONLY in strict JSON with this structure, no extra text:
   "args": {{}} or null,
   "explanation": "Short explanation in plain English"
 }}
+
+Important:
+- Use key `resourceType` (not `resource`).
+- Add `namespace` if required (e.g., for pods, deployments).
 """
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -95,14 +116,18 @@ Respond ONLY in strict JSON with this structure, no extra text:
 
         # Try direct JSON parse
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except json.JSONDecodeError:
-            # Fallback: extract JSON substring if Gemini adds extra text
+            # Fallback: extract JSON substring
             start = text.find("{")
             end = text.rfind("}") + 1
             if start != -1 and end != -1:
-                return json.loads(text[start:end])
-            return {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+                parsed = json.loads(text[start:end])
+            else:
+                return {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+
+        parsed["args"] = sanitize_args(parsed.get("args"))
+        return parsed
     except Exception as e:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
