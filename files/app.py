@@ -10,7 +10,7 @@ import google.generativeai as genai
 load_dotenv()
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDHN1tGJLFojK65QgcxnZm8QApZdXSDl1w")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -18,22 +18,16 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
-    """Send a JSON-RPC request to the MCP server."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params or {}
-    }
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     try:
         res = requests.post(
             MCP_SERVER_URL,
             headers={
                 "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
+                "Accept": "application/json, text/event-stream",
             },
             json=payload,
-            timeout=30
+            timeout=30,
         )
         res.raise_for_status()
 
@@ -48,7 +42,6 @@ def call_mcp_server(method: str, params: dict = None):
 
 
 def list_mcp_tools():
-    """Fetch list of available MCP tools."""
     resp = call_mcp_server("tools/list")
     if "result" in resp and isinstance(resp["result"], dict):
         return resp["result"].get("tools", [])
@@ -56,49 +49,46 @@ def list_mcp_tools():
 
 
 def call_tool(name: str, arguments: dict):
-    """Execute a specific MCP tool with arguments."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
-def parse_mcp_response(response: dict):
-    """Convert MCP server response into nice Streamlit output."""
+def render_mcp_response(response: dict):
+    """Pretty-print MCP server response like ChatGPT."""
     if "error" in response:
-        st.error(f"❌ Error: {response['error']}")
+        st.chat_message("assistant").error(f"❌ Error: {response['error']}")
         return
 
     result = response.get("result", {})
 
-    # Case 1: Standard text (describe, helm logs, etc.)
+    # Case 1: Text response (describe, helm output, etc.)
     content = result.get("content", [])
     if isinstance(content, list) and len(content) > 0:
         text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
         if text_blocks:
-            st.code("\n".join(text_blocks).strip(), language="yaml")
+            st.chat_message("assistant").code("\n".join(text_blocks).strip(), language="yaml")
             return
 
-    # Case 2: List responses (pods, namespaces, deployments, etc.)
+    # Case 2: Items list (namespaces, pods, deployments, etc.)
     if "items" in result:
         items = result.get("items", [])
         if not items:
-            st.info("ℹ️ No resources found in the cluster.")
+            st.chat_message("assistant").info("ℹ️ No resources found in the cluster.")
             return
 
         df = pd.DataFrame(items)
-        # Keep useful columns only if exist
         useful_cols = [col for col in ["name", "namespace", "kind", "status", "createdAt"] if col in df.columns]
         if useful_cols:
             df = df[useful_cols]
-        st.dataframe(df, use_container_width=True)
+        st.chat_message("assistant").dataframe(df, use_container_width=True)
         return
 
-    # Case 3: Unknown
-    st.warning("⚠️ No usable response from MCP server.")
+    # Case 3: Fallback
+    st.chat_message("assistant").warning("⚠️ No usable response from MCP server.")
 
 
 def ask_gemini(prompt: str):
-    """Send a free-text query to Gemini and return its response."""
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(prompt)
@@ -108,20 +98,16 @@ def ask_gemini(prompt: str):
 
 
 def sanitize_args(args: dict):
-    """Fix Gemini argument naming mismatches for MCP server."""
     if not args:
         return {}
     fixed = args.copy()
 
-    # Normalize key names
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
 
-    # Ensure namespace is set if required
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
 
-    # If "all" was given → map to "allNamespaces"
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
@@ -130,43 +116,32 @@ def sanitize_args(args: dict):
 
 
 def ask_gemini_for_tool_decision(query: str):
-    """
-    Ask Gemini whether the query needs MCP tool execution.
-    Always enforce JSON output with correct argument names.
-    """
     instruction = f"""
 You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
 
 Query: "{query}"
 
-Respond ONLY in strict JSON with this structure, no extra text:
+Respond ONLY in strict JSON:
 {{
   "tool": "kubectl_get" | "kubectl_create" | "kubectl_delete" | "kubectl_describe" | "install_helm_chart" | null,
   "args": {{}} or null,
-  "explanation": "Short explanation in plain English"
+  "explanation": "Short explanation"
 }}
-
-Important:
-- Use key `resourceType` (not `resource`).
-- Add `namespace` if required (e.g., for pods, deployments).
-- Use "allNamespaces": true if query refers to "all namespaces".
 """
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
         text = response.text.strip()
 
-        # Try direct JSON parse
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            # Fallback: extract JSON substring
             start = text.find("{")
             end = text.rfind("}") + 1
             if start != -1 and end != -1:
                 parsed = json.loads(text[start:end])
             else:
-                return {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+                return {"tool": None, "args": None, "explanation": f"Gemini invalid: {text}"}
 
         parsed["args"] = sanitize_args(parsed.get("args"))
         return parsed
@@ -174,40 +149,44 @@ Important:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
 
-# ---------------- STREAMLIT UI ----------------
-st.set_page_config(page_title="MCP Client UI", page_icon="⚡", layout="wide")
+# ---------------- STREAMLIT APP ----------------
+st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
 st.title("🤖 MCP Client – Kubernetes Assistant")
 
-# Sidebar with available tools
+# Init chat history
+if "messages" not in st.session_state:
+    st.session_state["messages"] = []
+
+# Sidebar tools
 tools = list_mcp_tools()
 if tools:
     st.sidebar.subheader("🔧 Available MCP Tools")
     for t in tools:
-        st.sidebar.write(f"- {t['name']}: {t.get('description', 'No description')}")
+        st.sidebar.write(f"- {t['name']}: {t.get('description', '')}")
 else:
-    st.sidebar.error("⚠️ Could not fetch tools from MCP server. Check server connectivity.")
+    st.sidebar.error("⚠️ Could not fetch tools from MCP server.")
 
-# User input
-st.subheader("💬 Query Kubernetes or Ask a Question")
-user_query = st.text_input("Enter your query (e.g., 'create namespace xyz', 'install harbor'):")
+# Render chat history
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-if st.button("Run Query"):
-    if not user_query.strip():
-        st.warning("Please enter a query first.")
+# Chat input
+if prompt := st.chat_input("Ask Kubernetes something..."):
+    # Show user message
+    st.chat_message("user").markdown(prompt)
+    st.session_state["messages"].append({"role": "user", "content": prompt})
+
+    # Decide with Gemini
+    decision = ask_gemini_for_tool_decision(prompt)
+    st.chat_message("assistant").markdown(f"💡 {decision.get('explanation', '')}")
+
+    if decision["tool"]:
+        st.chat_message("assistant").markdown(
+            f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
+        )
+        response = call_tool(decision["tool"], decision["args"])
+        render_mcp_response(response)
     else:
-        with st.spinner("🤖 Gemini is thinking..."):
-            decision = ask_gemini_for_tool_decision(user_query)
-
-        # Show Gemini’s explanation first
-        st.subheader("💡 Gemini Explanation")
-        st.markdown(decision.get("explanation", ""))
-
-        if decision["tool"]:
-            st.info(f"🔧 Executing MCP tool: `{decision['tool']}` with arguments: {decision['args']}")
-            response = call_tool(decision["tool"], decision["args"])
-
-            st.subheader("📡 MCP Server Response")
-            parse_mcp_response(response)  # ✅ Table or formatted text
-        else:
-            st.subheader("💡 Gemini Direct Answer")
-            st.markdown(ask_gemini(user_query))
+        answer = ask_gemini(prompt)
+        st.chat_message("assistant").markdown(answer)
