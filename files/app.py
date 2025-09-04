@@ -9,7 +9,7 @@ import google.generativeai as genai
 load_dotenv()
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -45,6 +45,7 @@ def call_mcp_server(method: str, params: dict = None):
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
+
 def list_mcp_tools():
     """Fetch list of available MCP tools."""
     resp = call_mcp_server("tools/list")
@@ -52,11 +53,13 @@ def list_mcp_tools():
         return resp["result"].get("tools", [])
     return []
 
+
 def call_tool(name: str, arguments: dict):
     """Execute a specific MCP tool with arguments."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
+
 
 def ask_gemini(prompt: str):
     """Send a free-text query to Gemini and return its response."""
@@ -67,32 +70,42 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"Gemini error: {str(e)}"
 
+
 def ask_gemini_for_tool_decision(query: str):
     """
     Ask Gemini whether the query needs MCP tool execution.
-    Gemini should return JSON with fields:
-    - tool: (string or null)
-    - args: (object or null)
-    - explanation: (string)
+    Always enforce JSON output.
     """
     instruction = f"""
 You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
 
 Query: "{query}"
 
-Respond ONLY in JSON with this structure:
+Respond ONLY in strict JSON with this structure, no extra text:
 {{
   "tool": "kubectl_get" | "kubectl_create" | "kubectl_delete" | "kubectl_describe" | "install_helm_chart" | null,
-  "args": {{...}} or null,
+  "args": {{}} or null,
   "explanation": "Short explanation in plain English"
 }}
 """
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
-        return json.loads(response.text)
+        text = response.text.strip()
+
+        # Try direct JSON parse
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Fallback: extract JSON substring if Gemini adds extra text
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start != -1 and end != -1:
+                return json.loads(text[start:end])
+            return {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
     except Exception as e:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="⚡", layout="wide")
