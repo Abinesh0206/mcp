@@ -10,7 +10,7 @@ import google.generativeai as genai
 load_dotenv()
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDHN1tGJLFojK65QgcxnZm8QApZdXSDl1w")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -57,35 +57,31 @@ def call_tool(name: str, arguments: dict):
 def render_mcp_response(response: dict):
     """Pretty-print MCP server response like ChatGPT."""
     if "error" in response:
-        st.chat_message("assistant").error(f"❌ Error: {response['error']}")
-        return
+        return f"❌ Error: {response['error']}"
 
     result = response.get("result", {})
 
-    # Case 1: Text response (describe, helm output, etc.)
+    # Case 1: Text response (helm install, describe, etc.)
     content = result.get("content", [])
     if isinstance(content, list) and len(content) > 0:
         text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
         if text_blocks:
-            st.chat_message("assistant").code("\n".join(text_blocks).strip(), language="yaml")
-            return
+            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
 
     # Case 2: Items list (namespaces, pods, deployments, etc.)
     if "items" in result:
         items = result.get("items", [])
         if not items:
-            st.chat_message("assistant").info("ℹ️ No resources found in the cluster.")
-            return
+            return "ℹ️ No resources found in the cluster."
 
         df = pd.DataFrame(items)
         useful_cols = [col for col in ["name", "namespace", "kind", "status", "createdAt"] if col in df.columns]
         if useful_cols:
             df = df[useful_cols]
-        st.chat_message("assistant").dataframe(df, use_container_width=True)
-        return
+        return df.to_markdown(index=False)
 
     # Case 3: Fallback
-    st.chat_message("assistant").warning("⚠️ No usable response from MCP server.")
+    return "⚠️ No usable response from MCP server."
 
 
 def ask_gemini(prompt: str):
@@ -169,24 +165,37 @@ else:
 # Render chat history
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg["role"] == "assistant" and isinstance(msg["content"], pd.DataFrame):
+            st.dataframe(msg["content"], use_container_width=True)
+        else:
+            st.markdown(msg["content"])
 
 # Chat input
 if prompt := st.chat_input("Ask Kubernetes something..."):
-    # Show user message
+    # Store user message
     st.chat_message("user").markdown(prompt)
     st.session_state["messages"].append({"role": "user", "content": prompt})
 
-    # Decide with Gemini
+    # Tool decision
     decision = ask_gemini_for_tool_decision(prompt)
-    st.chat_message("assistant").markdown(f"💡 {decision.get('explanation', '')}")
+    explanation = f"💡 {decision.get('explanation', '')}"
+    st.chat_message("assistant").markdown(explanation)
+    st.session_state["messages"].append({"role": "assistant", "content": explanation})
 
     if decision["tool"]:
         st.chat_message("assistant").markdown(
             f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
         )
         response = call_tool(decision["tool"], decision["args"])
-        render_mcp_response(response)
+        output = render_mcp_response(response)
+
+        if isinstance(output, str):
+            st.chat_message("assistant").markdown(output)
+            st.session_state["messages"].append({"role": "assistant", "content": output})
+        else:  # dataframe
+            st.chat_message("assistant").dataframe(output, use_container_width=True)
+            st.session_state["messages"].append({"role": "assistant", "content": output})
     else:
         answer = ask_gemini(prompt)
         st.chat_message("assistant").markdown(answer)
+        st.session_state["messages"].append({"role": "assistant", "content": answer})
