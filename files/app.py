@@ -14,7 +14,6 @@ MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDHN1tGJLFojK65QgcxnZm8QApZdXSDl1w")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-# Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------- HELPERS ----------------
@@ -31,7 +30,6 @@ def call_mcp_server(method: str, params: dict = None):
             timeout=30,
         )
         res.raise_for_status()
-
         text = res.text.strip()
         if text.startswith("event:"):
             for line in text.splitlines():
@@ -85,20 +83,12 @@ def render_mcp_response(response: dict):
 
     result = response.get("result", {})
 
-    # Case 1: Text response
-    content = result.get("content", [])
-    if isinstance(content, list) and len(content) > 0:
-        text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
-        if text_blocks:
-            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
-
-    # Case 2: Kubernetes items (namespaces, pods, etc.)
     if "items" in result:
         items = result.get("items", [])
         if not items:
             return "ℹ️ No resources found in the cluster."
 
-        # Detect if this is namespaces
+        # Kubernetes resources: name, status, age
         if all("name" in i and "status" in i and "createdAt" in i for i in items):
             rows = []
             for i in items:
@@ -110,9 +100,16 @@ def render_mcp_response(response: dict):
             df = pd.DataFrame(rows)
             return "```\n" + df.to_string(index=False) + "\n```"
 
-        # fallback generic
+        # fallback: show as markdown table
         df = pd.DataFrame(items)
-        return df.to_markdown(index=False)
+        return "```\n" + df.to_markdown(index=False) + "\n```"
+
+    # fallback text content
+    content = result.get("content", [])
+    if isinstance(content, list) and content:
+        text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
+        if text_blocks:
+            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
 
     return "⚠️ No usable response from MCP server."
 
@@ -130,17 +127,13 @@ def sanitize_args(args: dict):
     if not args:
         return {}
     fixed = args.copy()
-
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
-
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
-
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
-
     return fixed
 
 
@@ -202,7 +195,6 @@ for msg in st.session_state["messages"]:
 
 # Chat input
 if prompt := st.chat_input("Ask Kubernetes something..."):
-    # Store user message
     st.chat_message("user").markdown(prompt)
     st.session_state["messages"].append({"role": "user", "content": prompt})
 
@@ -218,7 +210,6 @@ if prompt := st.chat_input("Ask Kubernetes something..."):
         )
         response = call_tool(decision["tool"], decision["args"])
         output = render_mcp_response(response)
-
         st.chat_message("assistant").markdown(output)
         st.session_state["messages"].append({"role": "assistant", "content": output})
     else:
