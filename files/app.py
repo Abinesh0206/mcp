@@ -8,22 +8,24 @@ import google.generativeai as genai
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3000/mcp")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 K8S_MCP_TOKEN = os.getenv("K8S_MCP_TOKEN", "")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(GEMINI_MODEL)
+# Configure Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(GEMINI_MODEL)
+else:
+    model = None
 
 # ---------------- JSON-RPC HELPER ----------------
 def call_mcp(method, params=None):
     """
-    Send a JSON-RPC request to the MCP server via HTTP POST.
+    Send a JSON-RPC request to the MCP server via HTTP POST (/mcp).
     """
-    headers = {
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
     if K8S_MCP_TOKEN:
         headers["Authorization"] = f"Bearer {K8S_MCP_TOKEN}"
 
@@ -46,7 +48,6 @@ def list_tools():
 def ask_cluster(question: str):
     q = question.lower().strip()
 
-    # Map simple natural language questions to MCP tool calls
     if "namespaces" in q:
         return call_mcp("tools.call", {
             "name": "namespace_list",
@@ -87,25 +88,25 @@ for msg in st.session_state.messages:
 if prompt := st.chat_input("Ask about your Kubernetes cluster..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Show user message
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Process with MCP
     try:
         raw_response = ask_cluster(prompt)
         pretty_response = json.dumps(raw_response, indent=2)
 
-        # Optional: feed result into Gemini for natural explanation
-        gemini_response = model.generate_content(
-            f"User asked: {prompt}\n\nMCP raw response:\n{pretty_response}\n\nExplain clearly:"
-        )
-        answer = gemini_response.text
+        # Optional: natural explanation with Gemini
+        if model:
+            gemini_response = model.generate_content(
+                f"User asked: {prompt}\n\nMCP raw response:\n{pretty_response}\n\nExplain clearly:"
+            )
+            answer = gemini_response.text
+        else:
+            answer = pretty_response
 
     except Exception as e:
         answer = f"⚠️ Error: {str(e)}"
 
-    # Show assistant message
     with st.chat_message("assistant"):
         st.markdown(answer)
 
