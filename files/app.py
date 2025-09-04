@@ -8,8 +8,8 @@ import google.generativeai as genai
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -17,9 +17,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
-    """
-    Send a JSON-RPC request to MCP server
-    """
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -47,19 +44,16 @@ def call_mcp_server(method: str, params: dict = None):
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
-
 def list_mcp_tools():
     resp = call_mcp_server("tools/list")
     if "result" in resp and isinstance(resp["result"], dict):
         return resp["result"].get("tools", [])
     return []
 
-
 def call_tool(name: str, arguments: dict):
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
-
 
 def ask_gemini(prompt: str):
     try:
@@ -69,7 +63,7 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"Gemini error: {str(e)}"
 
-
+# ---------------- QUERY INTERPRETER ----------------
 def interpret_query(query: str):
     """
     Map user query → MCP tool & arguments
@@ -78,48 +72,85 @@ def interpret_query(query: str):
     if not query_lower:
         return {"tool": None, "args": None}
 
-    # Namespace queries
-    if "namespace" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "namespaces"}}
+    words = query_lower.split()
 
-    # Pods
-    if "pod" in query_lower:
-        namespace = "default"
-        if " in " in query_lower:
-            namespace = query_lower.split(" in ")[-1].strip()
-        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "namespace": namespace}}
+    # ---- CREATE ----
+    if query_lower.startswith("create namespace"):
+        name = words[-1]
+        return {"tool": "kubectl_create", "args": {"resourceType": "namespace", "name": name}}
 
-    # Services
-    if "service" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "services", "namespace": "default"}}
+    if query_lower.startswith("create pod"):
+        name = words[-1]
+        return {"tool": "kubectl_create", "args": {"resourceType": "pod", "name": name, "namespace": "default"}}
 
-    # Deployments
-    if "deployment" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "deployments", "namespace": "default"}}
+    # ---- DELETE ----
+    if query_lower.startswith("delete namespace"):
+        name = words[-1]
+        return {"tool": "kubectl_delete", "args": {"resourceType": "namespace", "name": name}}
 
-    # Describe pod
+    if query_lower.startswith("delete pod"):
+        name = words[-1]
+        return {"tool": "kubectl_delete", "args": {"resourceType": "pod", "name": name, "namespace": "default"}}
+
+    # ---- DESCRIBE ----
     if "describe" in query_lower and "pod" in query_lower:
-        parts = query_lower.split()
         try:
-            pod_index = parts.index("pod")
-            name = parts[pod_index + 1]
+            pod_index = words.index("pod")
+            name = words[pod_index + 1]
         except Exception:
             name = ""
         namespace = "default"
         if " in " in query_lower:
             namespace = query_lower.split(" in ")[-1].strip()
+        return {"tool": "kubectl_describe", "args": {"resourceType": "pod", "name": name, "namespace": namespace}}
+
+    # ---- GET ----
+    if "namespaces" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "namespaces"}}
+
+    if "pods" in query_lower:
+        namespace = "default"
+        if " in " in query_lower:
+            namespace = query_lower.split(" in ")[-1].strip()
+        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "namespace": namespace}}
+
+    if "services" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "services", "namespace": "default"}}
+
+    if "deployments" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "deployments", "namespace": "default"}}
+
+    # ---- HELM ----
+    if "install harbor" in query_lower or "install helm chart" in query_lower:
+        # Example default Harbor install
         return {
-            "tool": "kubectl_describe",
-            "args": {"resourceType": "pod", "name": name, "namespace": namespace}
+            "tool": "install_helm_chart",
+            "args": {
+                "name": "my-harbor",
+                "chart": "harbor/harbor",
+                "repo": "https://helm.goharbor.io",
+                "namespace": "harbor",
+                "values": {
+                    "expose": {
+                        "type": "nodePort",
+                        "tls": {"enabled": False},
+                        "nodePort": {
+                            "http": {"port": 30002},
+                            "https": {"port": 30003},
+                            "notary": {"port": 30004}
+                        }
+                    },
+                    "externalURL": "http://127.0.0.1:30002",
+                    "harborAdminPassword": "Harbor12345"
+                }
+            }
         }
 
-    # fallback → Gemini
+    # ---- FALLBACK → GEMINI ----
     return {"tool": None, "args": None}
-
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="⚡", layout="wide")
-
 st.title("🤖 MCP Client – Kubernetes Assistant")
 
 # Sidebar
@@ -133,7 +164,7 @@ else:
 
 # User input
 st.subheader("💬 Query Kubernetes or Ask a Question")
-user_query = st.text_input("Enter your query (e.g., 'show me all pods', 'describe pod xyz'):")
+user_query = st.text_input("Enter your query (e.g., 'create namespace xyz', 'install harbor'):")
 
 if st.button("Run Query"):
     if not user_query.strip():
@@ -151,7 +182,7 @@ if st.button("Run Query"):
             else:
                 st.json(response)
 
-            gemini_prompt = f"Explain the Kubernetes command or result related to: {user_query}"
+            gemini_prompt = f"Explain this Kubernetes/Helm action: {user_query}"
             st.subheader("💡 Gemini Explanation")
             st.markdown(ask_gemini(gemini_prompt))
         else:
