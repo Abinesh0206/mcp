@@ -5,12 +5,13 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
+from datetime import datetime, timezone
 
 # ---------------- CONFIG ----------------
 load_dotenv()
 
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDHN1tGJLFojK65QgcxnZm8QApZdXSDl1w")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -54,33 +55,65 @@ def call_tool(name: str, arguments: dict):
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
+def humanize_age(created_at: str) -> str:
+    """Convert createdAt timestamp → AGE like kubectl."""
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - created
+        seconds = int(delta.total_seconds())
+
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h{minutes % 60}m"
+        days = hours // 24
+        hours = hours % 24
+        return f"{days}d{hours}h"
+    except Exception:
+        return "-"
+
+
 def render_mcp_response(response: dict):
-    """Pretty-print MCP server response like ChatGPT."""
+    """Pretty-print MCP server response like kubectl."""
     if "error" in response:
         return f"❌ Error: {response['error']}"
 
     result = response.get("result", {})
 
-    # Case 1: Text response (helm install, describe, etc.)
+    # Case 1: Text response
     content = result.get("content", [])
     if isinstance(content, list) and len(content) > 0:
         text_blocks = [c.get("text", "") for c in content if c.get("type") == "text"]
         if text_blocks:
             return "```\n" + "\n".join(text_blocks).strip() + "\n```"
 
-    # Case 2: Items list (namespaces, pods, deployments, etc.)
+    # Case 2: Kubernetes items (namespaces, pods, etc.)
     if "items" in result:
         items = result.get("items", [])
         if not items:
             return "ℹ️ No resources found in the cluster."
 
+        # Detect if this is namespaces
+        if all("name" in i and "status" in i and "createdAt" in i for i in items):
+            rows = []
+            for i in items:
+                rows.append({
+                    "NAME": i["name"],
+                    "STATUS": i["status"],
+                    "AGE": humanize_age(i["createdAt"])
+                })
+            df = pd.DataFrame(rows)
+            return "```\n" + df.to_string(index=False) + "\n```"
+
+        # fallback generic
         df = pd.DataFrame(items)
-        useful_cols = [col for col in ["name", "namespace", "kind", "status", "createdAt"] if col in df.columns]
-        if useful_cols:
-            df = df[useful_cols]
         return df.to_markdown(index=False)
 
-    # Case 3: Fallback
     return "⚠️ No usable response from MCP server."
 
 
@@ -165,10 +198,7 @@ else:
 # Render chat history
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
-        if msg["role"] == "assistant" and isinstance(msg["content"], pd.DataFrame):
-            st.dataframe(msg["content"], use_container_width=True)
-        else:
-            st.markdown(msg["content"])
+        st.markdown(msg["content"])
 
 # Chat input
 if prompt := st.chat_input("Ask Kubernetes something..."):
@@ -189,12 +219,8 @@ if prompt := st.chat_input("Ask Kubernetes something..."):
         response = call_tool(decision["tool"], decision["args"])
         output = render_mcp_response(response)
 
-        if isinstance(output, str):
-            st.chat_message("assistant").markdown(output)
-            st.session_state["messages"].append({"role": "assistant", "content": output})
-        else:  # dataframe
-            st.chat_message("assistant").dataframe(output, use_container_width=True)
-            st.session_state["messages"].append({"role": "assistant", "content": output})
+        st.chat_message("assistant").markdown(output)
+        st.session_state["messages"].append({"role": "assistant", "content": output})
     else:
         answer = ask_gemini(prompt)
         st.chat_message("assistant").markdown(answer)
