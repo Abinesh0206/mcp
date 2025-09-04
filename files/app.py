@@ -8,8 +8,8 @@ import google.generativeai as genai
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:3000/mcp")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini
@@ -17,6 +17,9 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
+    """
+    Send a JSON-RPC request to MCP server
+    """
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -44,16 +47,19 @@ def call_mcp_server(method: str, params: dict = None):
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
+
 def list_mcp_tools():
     resp = call_mcp_server("tools/list")
     if "result" in resp and isinstance(resp["result"], dict):
         return resp["result"].get("tools", [])
     return []
 
+
 def call_tool(name: str, arguments: dict):
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
+
 
 def ask_gemini(prompt: str):
     try:
@@ -63,6 +69,7 @@ def ask_gemini(prompt: str):
     except Exception as e:
         return f"Gemini error: {str(e)}"
 
+
 def interpret_query(query: str):
     """
     Map user query → MCP tool & arguments
@@ -71,8 +78,27 @@ def interpret_query(query: str):
     if not query_lower:
         return {"tool": None, "args": None}
 
+    # Namespace queries
+    if "namespace" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "namespaces"}}
+
+    # Pods
+    if "pod" in query_lower:
+        namespace = "default"
+        if " in " in query_lower:
+            namespace = query_lower.split(" in ")[-1].strip()
+        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "namespace": namespace}}
+
+    # Services
+    if "service" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "services", "namespace": "default"}}
+
+    # Deployments
+    if "deployment" in query_lower:
+        return {"tool": "kubectl_get", "args": {"resourceType": "deployments", "namespace": "default"}}
+
+    # Describe pod
     if "describe" in query_lower and "pod" in query_lower:
-        # Example: describe pod xyz in namespace abc
         parts = query_lower.split()
         try:
             pod_index = parts.index("pod")
@@ -87,23 +113,9 @@ def interpret_query(query: str):
             "args": {"resourceType": "pod", "name": name, "namespace": namespace}
         }
 
-    if "namespace" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "namespaces"}}
-
-    if "pod" in query_lower:
-        namespace = "default"
-        if " in " in query_lower:
-            namespace = query_lower.split(" in ")[-1].strip()
-        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "namespace": namespace}}
-
-    if "service" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "services", "namespace": "default"}}
-
-    if "deployment" in query_lower:
-        return {"tool": "kubectl_get", "args": {"resourceType": "deployments", "namespace": "default"}}
-
     # fallback → Gemini
     return {"tool": None, "args": None}
+
 
 # ---------------- STREAMLIT UI ----------------
 st.set_page_config(page_title="MCP Client UI", page_icon="⚡", layout="wide")
