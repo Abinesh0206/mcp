@@ -92,7 +92,16 @@ def sanitize_args(args: dict):
 def ask_gemini_for_tool_decision(query: str):
     instruction = f"""
 You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
+
 Query: "{query}"
+
+If the query mentions installing or deploying an "official Helm chart" (like Harbor, GitLab, Prometheus, etc.),
+map it to the **install_helm_chart** tool and return the correct repository and chart name.
+
+Examples:
+- "deploy official helm chart for harbor" -> tool=install_helm_chart, args={{"repo":"https://helm.goharbor.io","chart":"harbor"}}
+- "install gitlab helm chart" -> tool=install_helm_chart, args={{"repo":"https://charts.gitlab.io","chart":"gitlab"}}
+
 Respond ONLY in strict JSON:
 {{
   "tool": "kubectl_get" | "kubectl_create" | "kubectl_delete" | "kubectl_describe" | "install_helm_chart" | null,
