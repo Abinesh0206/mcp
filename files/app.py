@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDHN1tGJLFojK65QgcxnZm8QApZdXSDl1w")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -72,35 +72,37 @@ def humanize_age(created_at: str) -> str:
 def render_mcp_response(response: dict):
     if "error" in response:
         return f"❌ Error: {response['error']}"
-
+    
     result = response.get("result", {})
-    items = result.get("items", [])
-    resource_type = result.get("resourceType")
-
-    if not items:
-        return "⚠️ No usable response from MCP server."
-
-    # --- Natural output for namespaces ---
-    if resource_type == "namespaces":
-        names = [i.get("name", "-") for i in items]
-        count = len(names)
-        formatted = "Your cluster currently has {} namespaces:\n- {}".format(
-            count, "\n- ".join(names)
-        )
-        return formatted
-
-    # --- Default: show table for other resources ---
-    rows = []
-    for i in items:
-        rows.append({
-            "NAME": i.get("name", "-"),
-            "STATUS": i.get("status", "-"),
-            "AGE": humanize_age(i.get("createdAt", "-"))
-        })
-    df = pd.DataFrame(rows)
-
-    st.dataframe(df, use_container_width=True)
-    return ""
+    if "items" in result:
+        items = result.get("items", [])
+        if not items:
+            return "ℹ️ No resources found in the cluster."
+        
+        # Special formatting for namespaces
+        if all("name" in i and "status" in i and "createdAt" in i and "kind" in i for i in items):
+            if items and items[0].get("kind") == "Namespace":
+                # Format for namespaces specifically
+                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
+                df = pd.DataFrame(rows)
+                return "```\n" + df.to_string(index=False) + "\n```"
+            else:
+                # Format for other resources (pods, etc.)
+                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
+                df = pd.DataFrame(rows)
+                return "```\n" + df.to_string(index=False) + "\n```"
+        
+        # Fallback to markdown for other types of data
+        df = pd.DataFrame(items)
+        return "```\n" + df.to_markdown(index=False) + "\n```"
+    
+    content = result.get("content", [])
+    if isinstance(content, list) and content:
+        text_blocks = [c.get("text","") for c in content if c.get("type")=="text"]
+        if text_blocks:
+            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
+    
+    return "⚠️ No usable response from MCP server."
 
 def ask_gemini(prompt: str):
     try:
@@ -114,22 +116,13 @@ def sanitize_args(args: dict):
     if not args:
         return {}
     fixed = args.copy()
-
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
-
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
-
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
-
-    # --- Fix: ensure namespaces always use JSON output ---
-    if fixed.get("resourceType") == "namespaces":
-        fixed["output"] = "json"
-        fixed.pop("command", None)
-
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
@@ -147,9 +140,12 @@ Respond ONLY in strict JSON:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
         text = response.text.strip()
-        # Safe JSON parse
-        start, end = text.find("{"), text.rfind("}") + 1
-        parsed = json.loads(text[start:end]) if start != -1 and end != -1 else {"tool": None, "args": None, "explanation": text}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            parsed = json.loads(text[start:end]) if start!=-1 and end!=-1 else {"tool":None,"args":None,"explanation":f"Gemini invalid: {text}"}
         parsed["args"] = sanitize_args(parsed.get("args"))
         return parsed
     except Exception as e:
@@ -195,10 +191,9 @@ def main():
                     f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
-                formatted = render_mcp_response(response)
-                if formatted:
-                    st.session_state["messages"].append({"role":"assistant","content":formatted})
-                    st.chat_message("assistant").markdown(formatted)
+                output = render_mcp_response(response)
+                st.session_state["messages"].append({"role":"assistant","content":output})
+                st.chat_message("assistant").markdown(output)
             else:
                 answer = ask_gemini(user_input)
                 st.session_state["messages"].append({"role":"assistant","content":answer})
