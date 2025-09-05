@@ -72,36 +72,27 @@ def humanize_age(created_at: str) -> str:
 def render_mcp_response(response: dict):
     if "error" in response:
         return f"❌ Error: {response['error']}"
-    
+
     result = response.get("result", {})
-    if "items" in result:
-        items = result.get("items", [])
-        if not items:
-            return "ℹ️ No resources found in the cluster."
-        
-        # Special formatting for namespaces
-        if all("name" in i and "status" in i and "createdAt" in i and "kind" in i for i in items):
-            if items and items[0].get("kind") == "Namespace":
-                # Format for namespaces specifically
-                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
-                df = pd.DataFrame(rows)
-                return "```\n" + df.to_string(index=False) + "\n```"
-            else:
-                # Format for other resources (pods, etc.)
-                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
-                df = pd.DataFrame(rows)
-                return "```\n" + df.to_string(index=False) + "\n```"
-        
-        # Fallback to markdown for other types of data
-        df = pd.DataFrame(items)
-        return "```\n" + df.to_markdown(index=False) + "\n```"
-    
+    items = result.get("items", [])
+    if items:
+        # Always format like kubectl get output
+        rows = []
+        for i in items:
+            rows.append({
+                "NAME": i.get("name", "-"),
+                "STATUS": i.get("status", "-"),
+                "AGE": humanize_age(i.get("createdAt", "-"))
+            })
+        df = pd.DataFrame(rows)
+        return "```\n" + df.to_string(index=False) + "\n```"
+
     content = result.get("content", [])
     if isinstance(content, list) and content:
         text_blocks = [c.get("text","") for c in content if c.get("type")=="text"]
         if text_blocks:
             return "```\n" + "\n".join(text_blocks).strip() + "\n```"
-    
+
     return "⚠️ No usable response from MCP server."
 
 def ask_gemini(prompt: str):
@@ -140,12 +131,9 @@ Respond ONLY in strict JSON:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
         text = response.text.strip()
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            parsed = json.loads(text[start:end]) if start!=-1 and end!=-1 else {"tool":None,"args":None,"explanation":f"Gemini invalid: {text}"}
+        # Safe JSON parse
+        start, end = text.find("{"), text.rfind("}") + 1
+        parsed = json.loads(text[start:end]) if start != -1 and end != -1 else {"tool": None, "args": None, "explanation": text}
         parsed["args"] = sanitize_args(parsed.get("args"))
         return parsed
     except Exception as e:
