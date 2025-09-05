@@ -49,61 +49,6 @@ def call_tool(name: str, arguments: dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
-def humanize_age(created_at: str) -> str:
-    try:
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        delta = now - created
-        seconds = int(delta.total_seconds())
-        if seconds < 60:
-            return f"{seconds}s"
-        minutes = seconds // 60
-        if minutes < 60:
-            return f"{minutes}m"
-        hours = minutes // 60
-        if hours < 24:
-            return f"{hours}h{minutes%60}m"
-        days = hours // 24
-        hours = hours % 24
-        return f"{days}d{hours}h"
-    except Exception:
-        return "-"
-
-def render_mcp_response(response: dict):
-    if "error" in response:
-        return f"❌ Error: {response['error']}"
-    
-    result = response.get("result", {})
-    if "items" in result:
-        items = result.get("items", [])
-        if not items:
-            return "ℹ️ No resources found in the cluster."
-        
-        # Special formatting for namespaces
-        if all("name" in i and "status" in i and "createdAt" in i and "kind" in i for i in items):
-            if items and items[0].get("kind") == "Namespace":
-                # Format for namespaces specifically
-                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
-                df = pd.DataFrame(rows)
-                return "```\n" + df.to_string(index=False) + "\n```"
-            else:
-                # Format for other resources (pods, etc.)
-                rows = [{"NAME": i["name"], "STATUS": i["status"], "AGE": humanize_age(i["createdAt"])} for i in items]
-                df = pd.DataFrame(rows)
-                return "```\n" + df.to_string(index=False) + "\n```"
-        
-        # Fallback to markdown for other types of data
-        df = pd.DataFrame(items)
-        return "```\n" + df.to_markdown(index=False) + "\n```"
-    
-    content = result.get("content", [])
-    if isinstance(content, list) and content:
-        text_blocks = [c.get("text","") for c in content if c.get("type")=="text"]
-        if text_blocks:
-            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
-    
-    return "⚠️ No usable response from MCP server."
-
 def ask_gemini(prompt: str):
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -191,9 +136,16 @@ def main():
                     f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
-                output = render_mcp_response(response)
-                st.session_state["messages"].append({"role":"assistant","content":output})
-                st.chat_message("assistant").markdown(output)
+
+                # 🔥 NEW: Ask Gemini to convert raw MCP JSON into natural human-friendly language
+                pretty_answer = ask_gemini(
+                    f"User asked: {user_input}\n\n"
+                    f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"Answer in natural human-friendly language without showing JSON."
+                )
+
+                st.session_state["messages"].append({"role":"assistant","content":pretty_answer})
+                st.chat_message("assistant").markdown(pretty_answer)
             else:
                 answer = ask_gemini(user_input)
                 st.session_state["messages"].append({"role":"assistant","content":answer})
