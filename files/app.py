@@ -137,13 +137,13 @@ def main():
                 )
                 response = call_tool(decision["tool"], decision["args"])
 
-                # 🔥 NEW: Ask Gemini to convert raw MCP JSON into natural human-friendly language
-               pretty_answer = ask_gemini(
-                   f"User asked: {user_input}\n\n"
-                   f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
-                   f"Answer in natural human-friendly language. "
-                   f"If the response contains multiple items (like namespaces, pods, services), "
-                   f"list them clearly in bullet points, one per line."
+                # 🔥 Fixed: always convert tool output to human-friendly bullet list
+                pretty_answer = ask_gemini(
+                    f"The user asked: {user_input}\n\n"
+                    f"Here is the raw Kubernetes JSON response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"Please answer in **clear natural human language**. "
+                    f"If multiple items are present (namespaces, pods, services, etc.), "
+                    f"format them as a clean bullet-point list, one per line."
                 )
 
                 st.session_state["messages"].append({"role":"assistant","content":pretty_answer})
