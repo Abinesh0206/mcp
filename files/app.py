@@ -75,8 +75,9 @@ def render_mcp_response(response: dict):
 
     result = response.get("result", {})
     items = result.get("items", [])
+
     if items:
-        # Always format like kubectl get output
+        # Format like kubectl get output (table style)
         rows = []
         for i in items:
             rows.append({
@@ -85,13 +86,10 @@ def render_mcp_response(response: dict):
                 "AGE": humanize_age(i.get("createdAt", "-"))
             })
         df = pd.DataFrame(rows)
-        return "```\n" + df.to_string(index=False) + "\n```"
 
-    content = result.get("content", [])
-    if isinstance(content, list) and content:
-        text_blocks = [c.get("text","") for c in content if c.get("type")=="text"]
-        if text_blocks:
-            return "```\n" + "\n".join(text_blocks).strip() + "\n```"
+        # Streamlit dataframe output
+        st.dataframe(df, use_container_width=True)
+        return ""  # we already rendered, no need to return text
 
     return "⚠️ No usable response from MCP server."
 
@@ -179,9 +177,7 @@ def main():
                     f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
-                output = render_mcp_response(response)
-                st.session_state["messages"].append({"role":"assistant","content":output})
-                st.chat_message("assistant").markdown(output)
+                render_mcp_response(response)  # direct render only
             else:
                 answer = ask_gemini(user_input)
                 st.session_state["messages"].append({"role":"assistant","content":answer})
