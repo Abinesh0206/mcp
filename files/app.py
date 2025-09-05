@@ -112,11 +112,7 @@ def sanitize_args(args: dict):
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
-    if fixed.get("all") is True:
-        fixed = {
-            "resourceType": "all",
-            "allNamespaces": True
-        }
+    }
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
