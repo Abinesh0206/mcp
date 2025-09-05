@@ -2,7 +2,6 @@ import os
 import json
 import requests
 import streamlit as st
-import pandas as pd
 from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime, timezone
@@ -10,7 +9,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDImymAJW10UvCVR6QUrnI0etEHKaEChfI")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_KEY_HERE")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -48,6 +47,26 @@ def call_tool(name: str, arguments: dict):
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
+
+def humanize_age(created_at: str) -> str:
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - created
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h{minutes%60}m"
+        days = hours // 24
+        hours = hours % 24
+        return f"{days}d{hours}h"
+    except Exception:
+        return "-"
 
 def ask_gemini(prompt: str):
     try:
@@ -137,17 +156,18 @@ def main():
                 )
                 response = call_tool(decision["tool"], decision["args"])
 
-                # 🔥 Fixed: always convert tool output to human-friendly bullet list
+                # 🔥 Convert raw JSON into natural language with bullet formatting
                 pretty_answer = ask_gemini(
-                    f"The user asked: {user_input}\n\n"
-                    f"Here is the raw Kubernetes JSON response:\n{json.dumps(response, indent=2)}\n\n"
-                    f"Please answer in **clear natural human language**. "
-                    f"If multiple items are present (namespaces, pods, services, etc.), "
-                    f"format them as a clean bullet-point list, one per line."
+                    f"User asked: {user_input}\n\n"
+                    f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"Answer in natural human-friendly language. "
+                    f"If the response contains multiple items (like namespaces, pods, services), "
+                    f"list them clearly as bullet points, one per line."
                 )
 
                 st.session_state["messages"].append({"role":"assistant","content":pretty_answer})
                 st.chat_message("assistant").markdown(pretty_answer)
+
             else:
                 answer = ask_gemini(user_input)
                 st.session_state["messages"].append({"role":"assistant","content":answer})
