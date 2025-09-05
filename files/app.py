@@ -75,23 +75,32 @@ def render_mcp_response(response: dict):
 
     result = response.get("result", {})
     items = result.get("items", [])
+    resource_type = result.get("resourceType")
 
-    if items:
-        # Format like kubectl get output (table style)
-        rows = []
-        for i in items:
-            rows.append({
-                "NAME": i.get("name", "-"),
-                "STATUS": i.get("status", "-"),
-                "AGE": humanize_age(i.get("createdAt", "-"))
-            })
-        df = pd.DataFrame(rows)
+    if not items:
+        return "⚠️ No usable response from MCP server."
 
-        # Streamlit dataframe output
-        st.dataframe(df, use_container_width=True)
-        return ""  # we already rendered, no need to return text
+    # --- Natural output for namespaces ---
+    if resource_type == "namespaces":
+        names = [i.get("name", "-") for i in items]
+        count = len(names)
+        formatted = "Your cluster currently has {} namespaces:\n- {}".format(
+            count, "\n- ".join(names)
+        )
+        return formatted
 
-    return "⚠️ No usable response from MCP server."
+    # --- Default: show table for other resources ---
+    rows = []
+    for i in items:
+        rows.append({
+            "NAME": i.get("name", "-"),
+            "STATUS": i.get("status", "-"),
+            "AGE": humanize_age(i.get("createdAt", "-"))
+        })
+    df = pd.DataFrame(rows)
+
+    st.dataframe(df, use_container_width=True)
+    return ""
 
 def ask_gemini(prompt: str):
     try:
@@ -105,13 +114,22 @@ def sanitize_args(args: dict):
     if not args:
         return {}
     fixed = args.copy()
+
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
+
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
+
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
+
+    # --- Fix: ensure namespaces always use JSON output ---
+    if fixed.get("resourceType") == "namespaces":
+        fixed["output"] = "json"
+        fixed.pop("command", None)
+
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
@@ -177,7 +195,10 @@ def main():
                     f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
-                render_mcp_response(response)  # direct render only
+                formatted = render_mcp_response(response)
+                if formatted:
+                    st.session_state["messages"].append({"role":"assistant","content":formatted})
+                    st.chat_message("assistant").markdown(formatted)
             else:
                 answer = ask_gemini(user_input)
                 st.session_state["messages"].append({"role":"assistant","content":answer})
