@@ -95,10 +95,15 @@ You are an AI agent that decides if a user query requires calling a Kubernetes M
 
 Query: "{query}"
 
-If the query mentions installing or deploying an "official Helm chart" (like Harbor, GitLab, Prometheus, etc.),
-map it to the **install_helm_chart** tool and return the correct repository and chart name.
+Rules:
+- If query contains "create namespace <name>", map to:
+  tool = "kubectl_create"
+  args = {{"resourceType": "namespace", "name": "<name>"}}
+- If query mentions installing an "official Helm chart" (like Harbor, GitLab, Prometheus),
+  map to "install_helm_chart" with correct repo + chart name.
 
 Examples:
+- "create namespace abinesh" -> tool=kubectl_create, args={{"resourceType":"namespace","name":"abinesh"}}
 - "deploy official helm chart for harbor" -> tool=install_helm_chart, args={{"repo":"https://helm.goharbor.io","chart":"harbor"}}
 - "install gitlab helm chart" -> tool=install_helm_chart, args={{"repo":"https://charts.gitlab.io","chart":"gitlab"}}
 
@@ -165,7 +170,6 @@ def main():
                 )
                 response = call_tool(decision["tool"], decision["args"])
 
-                # 🔥 Convert raw JSON into natural language with bullet formatting
                 pretty_answer = ask_gemini(
                     f"User asked: {user_input}\n\n"
                     f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
