@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4") 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -90,11 +90,11 @@ def sanitize_args(args: dict):
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
-    # Known Helm repos
+    # Official Helm repos
     helm_repos = {
         "harbor": {"repo": "https://helm.goharbor.io", "chart": "harbor"},
         "gitlab": {"repo": "https://charts.gitlab.io", "chart": "gitlab"},
-        "sonarqube": {"repo": "https://SonarSource.github.io/helm-chart-sonarqube", "chart": "sonarqube"},
+        "sonarqube": {"repo": "https://SonarSource.github.io/helm-chart-sonarqube", "chart": "sonarqube/sonarqube"},
         "prometheus": {"repo": "https://prometheus-community.github.io/helm-charts", "chart": "prometheus"},
     }
 
@@ -108,8 +108,7 @@ Rules:
 - "delete namespace <name>" -> tool=kubectl_delete, args={{"resourceType":"namespace","name":"<name>"}}
 - "how many pods in <ns>" -> tool=kubectl_get, args={{"resourceType":"pods","namespace":"<ns>"}}
 - "deploy/install official helm chart for <app>" -> 
-   tool=install_helm_chart, args=helm repo + chart + namespace.
-   Namespace: if mentioned use it, else "default".
+   tool=install_helm_chart, args={{"repo": "<repo>", "chart": "<chart>", "namespace": "<ns>", "createNamespace": true}}
 
 Known Helm repos: {json.dumps(helm_repos, indent=2)}
 
