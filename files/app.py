@@ -90,12 +90,13 @@ def sanitize_args(args: dict):
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
-    # Official Helm repos
+    # ✅ Extensible official Helm repos
     helm_repos = {
         "harbor": {"repo": "https://helm.goharbor.io", "chart": "harbor"},
         "gitlab": {"repo": "https://charts.gitlab.io", "chart": "gitlab"},
         "sonarqube": {"repo": "https://SonarSource.github.io/helm-chart-sonarqube", "chart": "sonarqube/sonarqube"},
         "prometheus": {"repo": "https://prometheus-community.github.io/helm-charts", "chart": "prometheus"},
+        "nginx-ingress": {"repo": "https://kubernetes.github.io/ingress-nginx", "chart": "ingress-nginx"},
     }
 
     instruction = f"""
@@ -108,7 +109,7 @@ Rules:
 - "delete namespace <name>" -> tool=kubectl_delete, args={{"resourceType":"namespace","name":"<name>"}}
 - "how many pods in <ns>" -> tool=kubectl_get, args={{"resourceType":"pods","namespace":"<ns>"}}
 - "deploy/install official helm chart for <app>" -> 
-   tool=install_helm_chart, args={{"repo": "<repo>", "chart": "<chart>", "namespace": "<ns>", "createNamespace": true}}
+   tool=install_helm_chart, args={{"repo": "<repo>", "chart": "<chart>", "namespace": "<app>", "createNamespace": true}}
 
 Known Helm repos: {json.dumps(helm_repos, indent=2)}
 
@@ -174,6 +175,12 @@ def main():
                     f"🔧 Executing **{decision['tool']}** with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
+
+                # ✅ Extra step: If Helm install → list pods in namespace
+                if decision["tool"] == "install_helm_chart" and "namespace" in decision["args"]:
+                    ns = decision["args"]["namespace"]
+                    pods = call_tool("kubectl_get", {"resourceType": "pods", "namespace": ns})
+                    response = {"installResponse": response, "pods": pods}
 
                 pretty_answer = ask_gemini(
                     f"User asked: {user_input}\n\n"
