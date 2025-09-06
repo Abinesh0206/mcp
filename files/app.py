@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4") 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -90,22 +90,28 @@ def sanitize_args(args: dict):
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
-    instruction = f"""
-You are an AI agent that decides if a user query requires calling a Kubernetes MCP tool.
+    # Known Helm repos
+    helm_repos = {
+        "harbor": {"repo": "https://helm.goharbor.io", "chart": "harbor"},
+        "gitlab": {"repo": "https://charts.gitlab.io", "chart": "gitlab"},
+        "sonarqube": {"repo": "https://SonarSource.github.io/helm-chart-sonarqube", "chart": "sonarqube"},
+        "prometheus": {"repo": "https://prometheus-community.github.io/helm-charts", "chart": "prometheus"},
+    }
 
-Query: "{query}"
+    instruction = f"""
+You are an AI agent that maps user queries to Kubernetes MCP tools.
+
+User query: "{query}"
 
 Rules:
-- If query contains "create namespace <name>", map to:
-  tool = "kubectl_create"
-  args = {{"resourceType": "namespace", "name": "<name>"}}
-- If query mentions installing an "official Helm chart" (like Harbor, GitLab, Prometheus),
-  map to "install_helm_chart" with correct repo + chart name.
+- "create namespace <name>" -> tool=kubectl_create, args={{"resourceType":"namespace","name":"<name>"}}
+- "delete namespace <name>" -> tool=kubectl_delete, args={{"resourceType":"namespace","name":"<name>"}}
+- "how many pods in <ns>" -> tool=kubectl_get, args={{"resourceType":"pods","namespace":"<ns>"}}
+- "deploy/install official helm chart for <app>" -> 
+   tool=install_helm_chart, args=helm repo + chart + namespace.
+   Namespace: if mentioned use it, else "default".
 
-Examples:
-- "create namespace abinesh" -> tool=kubectl_create, args={{"resourceType":"namespace","name":"abinesh"}}
-- "deploy official helm chart for harbor" -> tool=install_helm_chart, args={{"repo":"https://helm.goharbor.io","chart":"harbor"}}
-- "install gitlab helm chart" -> tool=install_helm_chart, args={{"repo":"https://charts.gitlab.io","chart":"gitlab"}}
+Known Helm repos: {json.dumps(helm_repos, indent=2)}
 
 Respond ONLY in strict JSON:
 {{
@@ -174,8 +180,7 @@ def main():
                     f"User asked: {user_input}\n\n"
                     f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
                     f"Answer in natural human-friendly language. "
-                    f"If the response contains multiple items (like namespaces, pods, services), "
-                    f"list them clearly as bullet points, one per line."
+                    f"If multiple items (pods, namespaces, services), format as bullet points."
                 )
 
                 st.session_state["messages"].append({"role":"assistant","content":pretty_answer})
