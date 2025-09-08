@@ -57,5 +57,5 @@ spec:
                 path: app.py
               - key: requirements.txt
                 path: requirements.txt
-              - key: servers.json
+              - key: mcp_config.json
                 path: servers.json
