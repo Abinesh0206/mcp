@@ -154,7 +154,7 @@ Respond ONLY in strict JSON:
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 MCP Client – Kubernetes Assistant")
+    st.title("🤖 Masa Bot Assistant")
 
     # Sidebar: select MCP server
     st.sidebar.subheader("🌐 Select MCP Server")
