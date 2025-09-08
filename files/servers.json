@@ -3,7 +3,7 @@
     {
       "name": "kubernetes",
       "type": "http",
-      "baseUrl": "http://18.234.91.216:3000/mcp",
+      "baseUrl": "http://18.234.91.216:3000",  
       "authHeader": "Bearer ${K8S_MCP_TOKEN}"
     },
     {
