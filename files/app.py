@@ -8,18 +8,35 @@ from datetime import datetime, timezone
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://13.221.252.52:3000/mcp")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
+
+# ---------------- LOAD SERVERS ----------------
+def load_servers():
+    try:
+        with open("servers.json") as f:
+            data = json.load(f)
+            return data.get("servers", [])
+    except Exception as e:
+        return [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": f"Fallback server: {e}"}]
+
+servers = load_servers()
+
+# Default to first server
+if "current_server" not in st.session_state:
+    st.session_state["current_server"] = servers[0]["url"]
+
+def get_current_server_url():
+    return st.session_state.get("current_server", servers[0]["url"])
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     try:
         res = requests.post(
-            MCP_SERVER_URL,
+            get_current_server_url(),
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
@@ -90,7 +107,6 @@ def sanitize_args(args: dict):
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
-    # ✅ Extensible official Helm repos
     helm_repos = {
         "harbor": {"repo": "https://helm.goharbor.io", "chart": "harbor"},
         "gitlab": {"repo": "https://charts.gitlab.io", "chart": "gitlab"},
@@ -129,7 +145,7 @@ Respond ONLY in strict JSON:
         except json.JSONDecodeError:
             start = text.find("{")
             end = text.rfind("}") + 1
-            parsed = json.loads(text[start:end]) if start!=-1 and end!=-1 else {"tool":None,"args":None,"explanation":f"Gemini invalid: {text}"}
+            parsed = json.loads(text[start:end]) if start != -1 and end != -1 else {"tool": None, "args": None, "explanation": f"Gemini invalid: {text}"}
         parsed["args"] = sanitize_args(parsed.get("args"))
         return parsed
     except Exception as e:
@@ -140,10 +156,13 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 MCP Client – Kubernetes Assistant")
 
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = []
+    # Sidebar: select MCP server
+    st.sidebar.subheader("🌐 Select MCP Server")
+    server_names = [f"{s['name']} ({s['url']})" for s in servers]
+    choice = st.sidebar.radio("Available Servers:", server_names)
+    st.session_state["current_server"] = next(s["url"] for s in servers if choice.startswith(s["name"]))
 
-    # Sidebar tools
+    # Show tools for current server
     tools = list_mcp_tools()
     if tools:
         st.sidebar.subheader("🔧 Available MCP Tools")
@@ -151,6 +170,9 @@ def main():
             st.sidebar.write(f"- {t['name']}: {t.get('description','')}")
     else:
         st.sidebar.error("⚠ Could not fetch tools from MCP server.")
+
+    if "messages" not in st.session_state:
+        st.session_state["messages"] = []
 
     # Display chat history
     for msg in st.session_state["messages"]:
@@ -162,21 +184,20 @@ def main():
         user_input = st.text_input("Ask Kubernetes something...")
         submitted = st.form_submit_button("Send")
         if submitted and user_input:
-            st.session_state["messages"].append({"role":"user","content":user_input})
+            st.session_state["messages"].append({"role": "user", "content": user_input})
             st.chat_message("user").markdown(user_input)
 
             decision = ask_gemini_for_tool_decision(user_input)
             explanation = f"💡 {decision.get('explanation','')}"
-            st.session_state["messages"].append({"role":"assistant","content":explanation})
+            st.session_state["messages"].append({"role": "assistant", "content": explanation})
             st.chat_message("assistant").markdown(explanation)
 
             if decision["tool"]:
                 st.chat_message("assistant").markdown(
-                    f"🔧 Executing *{decision['tool']}* with arguments:\njson\n{json.dumps(decision['args'], indent=2)}\n"
+                    f"🔧 Executing *{decision['tool']}* with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
                 response = call_tool(decision["tool"], decision["args"])
 
-                # ✅ Extra step: If Helm install → list pods in namespace
                 if decision["tool"] == "install_helm_chart" and "namespace" in decision["args"]:
                     ns = decision["args"]["namespace"]
                     pods = call_tool("kubectl_get", {"resourceType": "pods", "namespace": ns})
@@ -189,12 +210,12 @@ def main():
                     f"If multiple items (pods, namespaces, services), format as bullet points."
                 )
 
-                st.session_state["messages"].append({"role":"assistant","content":pretty_answer})
+                st.session_state["messages"].append({"role": "assistant", "content":pretty_answer})
                 st.chat_message("assistant").markdown(pretty_answer)
 
             else:
                 answer = ask_gemini(user_input)
-                st.session_state["messages"].append({"role":"assistant","content":answer})
+                st.session_state["messages"].append({"role": "assistant", "content": answer})
                 st.chat_message("assistant").markdown(answer)
 
 if __name__ == "__main__":
