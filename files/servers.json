@@ -6,8 +6,8 @@
       "description": "Primary Kubernetes MCP server"
     },
     {
-      "name": "dev-mcp",
-      "url": "http://10.0.0.25:3000/mcp",
+      "name": "argocd-mcp",
+      "url": "http://13.222.157.210:3000/",
       "description": "Development cluster MCP server"
     },
     {
