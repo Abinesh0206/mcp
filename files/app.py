@@ -210,7 +210,7 @@ def process_user_query(user_input: str):
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 MCP Client – Kubernetes / Jenkins / ArgoCD Assistant")
+    st.title("☃️Masa Bot")
 
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
