@@ -12,7 +12,7 @@
     },
     {
       "name": "staging-mcp",
-      "url": "http://10.0.1.50:3000/mcp",
+      "url": "http://54.227.78.211:8080/",
       "description": "Staging Kubernetes MCP server"
     }
   ]
