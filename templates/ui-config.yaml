@@ -7,5 +7,5 @@ data:
 {{ (.Files.Get "files/app.py") | indent 4 }}
   requirements.txt: |
 {{ (.Files.Get "files/requirements.txt") | indent 4 }}
-  mcp_config.json: |
+  servers.json: |
 {{ (.Files.Get "files/servers.json") | indent 4 }}
