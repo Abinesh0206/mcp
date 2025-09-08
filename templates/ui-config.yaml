@@ -8,4 +8,4 @@ data:
   requirements.txt: |
 {{ (.Files.Get "files/requirements.txt") | indent 4 }}
   mcp_config.json: |
-{{ (.Files.Get "files/mcp_config.example.json") | indent 4 }}
+{{ (.Files.Get "files/servers.json") | indent 4 }}
