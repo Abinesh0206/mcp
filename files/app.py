@@ -197,5 +197,6 @@ def main():
                 st.session_state["messages"].append({"role":"assistant","content":answer})
                 st.chat_message("assistant").markdown(answer)
 
-if _name_ == "_main_":
+# ✅ Correct Python entrypoint
+if __name__ == "__main__":
     main()
