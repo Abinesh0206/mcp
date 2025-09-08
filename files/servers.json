@@ -15,7 +15,7 @@
     {
       "name": "argocd",
       "type": "http",
-      "baseUrl": "http://3.85.77.212:3000",
+      "baseUrl": "http://13.222.157.210:3000",
       "authHeader": "Bearer ${ARGOCD_MCP_TOKEN}"
     }
   ],
