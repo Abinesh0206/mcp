@@ -1,10 +1,9 @@
 {
   "servers": [
     {
-      "name": "kubernetes",
-      "type": "http",
-      "baseUrl": "http://18.234.91.216:3000/mcp",  
-      "authHeader": "Bearer ${K8S_MCP_TOKEN}"
+      "name": "kubernetes-mcp",
+      "url": "http://13.221.252.52:3000/mcp",
+      "description": "Primary Kubernetes MCP server"
     },
     {
       "name": "jenkins",
