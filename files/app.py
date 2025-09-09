@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC9wiw7fC2StEswOaINsoOw4Ip4n-9IDa4")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 genai.configure(api_key=GEMINI_API_KEY)
