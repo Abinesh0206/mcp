@@ -11,7 +11,7 @@
       "description": "Development cluster MCP server"
     },
     {
-      "name": "staging-mcp",
+      "name": "jenkins-mcp",
       "url": "http://54.227.78.211:8080/",
       "description": "Staging Kubernetes MCP server"
     }
