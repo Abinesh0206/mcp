@@ -7,7 +7,7 @@
     },
     {
       "name": "argocd-mcp",
-      "url": "http://13.222.157.210:3000/",
+      "url": "http://13.222.157.210:3000/mcp",
       "description": "Development cluster MCP server"
     },
     {
