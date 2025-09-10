@@ -107,32 +107,25 @@ def sanitize_args(args: dict):
     return fixed
 
 def ask_gemini_for_tool_decision(query: str):
-    helm_repos = {
-        "harbor": {"repo": "https://helm.goharbor.io", "chart": "harbor"},
-        "gitlab": {"repo": "https://charts.gitlab.io", "chart": "gitlab"},
-        "sonarqube": {"repo": "https://SonarSource.github.io/helm-chart-sonarqube", "chart": "sonarqube/sonarqube"},
-        "prometheus": {"repo": "https://prometheus-community.github.io/helm-charts", "chart": "prometheus"},
-        "nginx-ingress": {"repo": "https://kubernetes.github.io/ingress-nginx", "chart": "ingress-nginx"},
-    }
+    tools = list_mcp_tools()
+    tool_names = [t["name"] for t in tools]
 
     instruction = f"""
-You are an AI agent that maps user queries to Kubernetes MCP tools.
+You are an AI agent that maps user queries to MCP tools.
 
 User query: "{query}"
 
-Rules:
-- "create namespace <name>" -> tool=kubectl_create, args={{"resourceType":"namespace","name":"<name>"}}
-- "delete namespace <name>" -> tool=kubectl_delete, args={{"resourceType":"namespace","name":"<name>"}}
-- "how many pods in <ns>" -> tool=kubectl_get, args={{"resourceType":"pods","namespace":"<ns>"}}
-- "deploy/install official helm chart for <app>" -> 
-   tool=install_helm_chart, args={{"repo": "<repo>", "chart": "<chart>", "namespace": "<app>", "createNamespace": true}}
+Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
-Known Helm repos: {json.dumps(helm_repos, indent=2)}
+Rules:
+- Only choose from the tools above.
+- If the query clearly maps to a tool, return tool + args in JSON.
+- If unsure, set tool=null and args=null.
 
 Respond ONLY in strict JSON:
 {{
-  "tool": "kubectl_get" | "kubectl_create" | "kubectl_delete" | "kubectl_describe" | "install_helm_chart" | null,
-  "args": {{}} or null,
+  "tool": "<tool_name>" | null,
+  "args": {{}} | null,
   "explanation": "Short explanation"
 }}
 """
@@ -181,7 +174,7 @@ def main():
 
     # Chat input
     with st.form("user_input_form", clear_on_submit=True):
-        user_input = st.text_input("Ask Kubernetes something...")
+        user_input = st.text_input("Ask Kubernetes or ArgoCD something...")
         submitted = st.form_submit_button("Send")
         if submitted and user_input:
             st.session_state["messages"].append({"role": "user", "content": user_input})
@@ -198,19 +191,14 @@ def main():
                 )
                 response = call_tool(decision["tool"], decision["args"])
 
-                if decision["tool"] == "install_helm_chart" and "namespace" in decision["args"]:
-                    ns = decision["args"]["namespace"]
-                    pods = call_tool("kubectl_get", {"resourceType": "pods", "namespace": ns})
-                    response = {"installResponse": response, "pods": pods}
-
                 pretty_answer = ask_gemini(
                     f"User asked: {user_input}\n\n"
-                    f"Here is the raw Kubernetes response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"Here is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
                     f"Answer in natural human-friendly language. "
-                    f"If multiple items (pods, namespaces, services), format as bullet points."
+                    f"If multiple items (pods, apps, projects, services), format as bullet points."
                 )
 
-                st.session_state["messages"].append({"role": "assistant", "content":pretty_answer})
+                st.session_state["messages"].append({"role": "assistant", "content": pretty_answer})
                 st.chat_message("assistant").markdown(pretty_answer)
 
             else:
