@@ -46,6 +46,7 @@ def call_mcp_server(method: str, params: dict = None):
         )
         res.raise_for_status()
         text = res.text.strip()
+        # handle SSE-like response that MCP sometimes returns
         if text.startswith("event:"):
             for line in text.splitlines():
                 if line.startswith("data:"):
@@ -144,6 +145,31 @@ Respond ONLY in strict JSON:
     except Exception as e:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
+# ---------------- NEW: ArgoCD application helper ----------------
+def try_create_argocd_app(args: dict):
+    """
+    Try multiple likely MCP tool names for creating an ArgoCD Application.
+    Returns the first successful response or the last error received.
+    """
+    possible_tool_names = [
+        "argocd/create_application",
+        "argocd_create_application",
+        "applications/create",
+        "argocd.applications.create",
+        "argocd.create_application",
+        # fallback generic tool which simply sends raw method (some MCP servers map differently)
+        # We will also try to call tools/call with name "argocd-create-application"
+        "argocd-create-application",
+    ]
+    last_err = None
+    for tname in possible_tool_names:
+        resp = call_tool(tname, args)
+        # consider success if there is no "error" field and either "result" or a success string
+        if isinstance(resp, dict) and not resp.get("error") and (resp.get("result") is not None or resp):
+            return {"tool": tname, "response": resp}
+        last_err = {"tool": tname, "response": resp}
+    return {"tool": None, "response": last_err}
+
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
@@ -167,12 +193,96 @@ def main():
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
+    # ------ NEW: ArgoCD Application creation form ------
+    st.markdown("## ➕ Create ArgoCD Application (manual form)")
+    with st.form("argocd_app_form"):
+        st.write("### GENERAL")
+        app_name = st.text_input("Application Name", value="")
+        project = st.text_input("Project Name", value="default")
+        sync_policy = st.selectbox("Sync Policy", options=["Manual", "Automatic"], index=0)
+        manual_flag = (sync_policy == "Manual")
+        set_deletion_finalizer = st.checkbox("Set Deletion Finalizer", value=False)
+        skip_schema_validation = st.checkbox("Skip Schema Validation", value=False)
+        auto_create_namespace = st.checkbox("Auto-Create Namespace", value=False)
+        prune_last = st.checkbox("Prune Last", value=False)
+        apply_out_of_sync_only = st.checkbox("Apply Out of Sync Only", value=False)
+        respect_ignore_differences = st.checkbox("Respect Ignore Differences", value=False)
+        server_side_apply = st.checkbox("Server-Side Apply", value=False)
+        prune_propagation_policy = st.selectbox("Prune Propagation Policy", options=["foreground", "background", "orphan"], index=0)
+        replace_flag = st.checkbox("Replace", value=False)
+        retry_flag = st.checkbox("Retry", value=False)
+
+        st.write("---")
+        st.write("### SOURCE")
+        repository_url = st.text_input("Repository URL (GIT)", value="")
+        revision = st.text_input("Revision (HEAD)", value="HEAD")
+        branches = st.text_input("Branches (comma separated)", value="")
+        path = st.text_input("Path (path to manifests, e.g. apps/my-app)", value="")
+
+        st.write("---")
+        st.write("### DESTINATION")
+        dest_cluster_url = st.text_input("Cluster URL (eg https://kubernetes.default.svc)", value="")
+        dest_namespace = st.text_input("Destination Namespace", value="default")
+
+        submitted_app = st.form_submit_button("Create ArgoCD Application")
+
+    if submitted_app:
+        # Validate minimal inputs
+        if not app_name or not repository_url or not path:
+            st.error("Please provide at least Application Name, Repository URL and Path.")
+        else:
+            # Build args payload
+            branches_list = [b.strip() for b in branches.split(",")] if branches else []
+            args = {
+                "name": app_name,
+                "project": project,
+                "syncPolicy": "Manual" if manual_flag else "Automatic",
+                "settings": {
+                    "setDeletionFinalizer": set_deletion_finalizer,
+                    "skipSchemaValidation": skip_schema_validation,
+                    "autoCreateNamespace": auto_create_namespace,
+                    "pruneLast": prune_last,
+                    "applyOutOfSyncOnly": apply_out_of_sync_only,
+                    "respectIgnoreDifferences": respect_ignore_differences,
+                    "serverSideApply": server_side_apply,
+                    "prunePropagationPolicy": prune_propagation_policy,
+                    "replace": replace_flag,
+                    "retry": retry_flag,
+                },
+                "source": {
+                    "repoURL": repository_url,
+                    "path": path,
+                    "targetRevision": revision,
+                },
+                "destination": {
+                    "server": dest_cluster_url,
+                    "namespace": dest_namespace,
+                }
+            }
+            if branches_list:
+                args["source"]["branches"] = branches_list
+
+            # sanitize (reuse your helper)
+            args = sanitize_args(args)
+
+            st.chat_message("assistant").markdown(f"🔧 Attempting to create ArgoCD Application with args:\n```json\n{json.dumps(args, indent=2)}\n```")
+
+            result = try_create_argocd_app(args)
+            if result.get("tool"):
+                st.success(f"Called tool `{result['tool']}`. Response:")
+                st.write(result["response"])
+                st.session_state["messages"].append({"role":"assistant", "content": f"Created via `{result['tool']}`: {json.dumps(result['response'], indent=2)}"})
+            else:
+                st.error("Failed to create ArgoCD application. Tried multiple tool names; see last responses.")
+                st.write(result["response"])
+                st.session_state["messages"].append({"role":"assistant", "content": f"Create failed: {json.dumps(result['response'], indent=2)}"})
+
     # Display chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Chat input
+    # Chat input (original)
     with st.form("user_input_form", clear_on_submit=True):
         user_input = st.text_input("Ask Kubernetes or ArgoCD something...")
         submitted = st.form_submit_button("Send")
@@ -189,7 +299,7 @@ def main():
                 st.chat_message("assistant").markdown(
                     f"🔧 Executing *{decision['tool']}* with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
                 )
-                response = call_tool(decision["tool"], decision["args"])
+                response = call_tool(decision['tool'], decision['args'])
 
                 pretty_answer = ask_gemini(
                     f"User asked: {user_input}\n\n"
