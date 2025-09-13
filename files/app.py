@@ -295,8 +295,8 @@ def main():
                 app_name_for_status = create_payload.get("name")
                 if app_name_for_status:
                     status_resp = call_tool("get_application", {"application_name": app_name_for_status})
-                    st.markdown("**Current Status (get_application):**")
-                    st.json(status_resp)
+                    # st.markdown("**Current Status (get_application):**")
+                    # st.json(status_resp)
                     if GEMINI_AVAILABLE:
                         pretty_status = ask_gemini(
                             f"Here is the status of ArgoCD application '{app_name_for_status}':\n"
