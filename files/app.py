@@ -13,14 +13,14 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
+# Configure Gemini SDK if key present
+GEMINI_AVAILABLE = False
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         GEMINI_AVAILABLE = True
     except Exception:
         GEMINI_AVAILABLE = False
-else:
-    GEMINI_AVAILABLE = False
 
 # ---------------- SERVERS ----------------
 def load_servers():
@@ -38,13 +38,13 @@ def load_servers():
         }]
 
 servers = load_servers()
-
 if not servers:
     servers = [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
 
 # Initialize current server in session state
 if "current_server" not in st.session_state:
     st.session_state["current_server"] = servers[0]["url"]
+
 
 def get_current_server_url():
     return st.session_state.get("current_server", servers[0]["url"])
@@ -108,7 +108,6 @@ def call_tool(name: str, arguments: dict):
     """Execute MCP tool by name with arguments. Returns parsed response dict."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
-    # keep the original structure for tool call
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
@@ -142,7 +141,6 @@ def ask_gemini(prompt: str):
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(prompt)
-        # model.generate_content returns an object with .text
         return response.text if hasattr(response, "text") else str(response)
     except Exception as e:
         return f"Gemini error: {str(e)}"
@@ -216,7 +214,6 @@ def main():
     st.sidebar.subheader("🌐 Select MCP Server")
     server_options = [f"{s['name']} — {s['url']}" for s in servers]
     choice = st.sidebar.radio("Available Servers:", server_options)
-    # map back to URL robustly
     selected = next((s for s in servers if choice.startswith(s["name"])), servers[0])
     st.session_state["current_server"] = selected["url"]
 
@@ -240,76 +237,6 @@ def main():
     if "create_flow_form" not in st.session_state:
         st.session_state["create_flow_form"] = False
 
-    # Init legacy stepwise flow state kept but disabled by default
-    if "create_flow" not in st.session_state:
-        st.session_state["create_flow"] = None
-        st.session_state["create_data"] = {}
-
-    # If the form-mode create flow is active, show the full form (preferred UI)
-    if st.session_state["create_flow_form"]:
-        st.header("Create ArgoCD Application — Form")
-        with st.form("create_app_form"):
-            name = st.text_input("Application Name", value="")
-            project = st.text_input("Project Name", value="default")
-            repo_url = st.text_input("Repository URL", value="")
-            path = st.text_input("Path (in repo)", value="")
-            dest_ns = st.text_input("Destination Namespace", value="default")
-            cluster_url = st.text_input("Cluster URL", value="https://kubernetes.default.svc")
-            sync_policy = st.selectbox("Sync Policy", options=["Manual", "Automated"], index=0)
-            auto_create_ns = st.checkbox("Auto-Create Namespace", value=True)
-            prune = st.checkbox("Prune (remove resources not defined)", value=False)
-            server_side_apply = st.checkbox("Server-Side Apply", value=True)
-            submit_create = st.form_submit_button("Create Application")
-
-        if submit_create:
-            if not name or not repo_url or not path:
-                st.error("Please provide at least: Application Name, Repository URL, and Path.")
-            else:
-                create_payload = {
-                    "name": name,
-                    "project": project,
-                    "repo_url": repo_url,
-                    "path": path,
-                    "dest_ns": dest_ns,
-                    "cluster": cluster_url,
-                    "sync_policy": sync_policy.lower(),
-                    "auto_create_ns": bool(auto_create_ns),
-                    "prune": bool(prune),
-                    "server_side_apply": bool(server_side_apply),
-                }
-                st.info(f"Creating application `{name}`...")
-                resp = call_tool("create_application", create_payload)
-                # st.write("Create response:")
-                # st.json(resp)
-
-                # Natural language summary if gemini available
-                if GEMINI_AVAILABLE:
-                    pretty_create = ask_gemini(
-                        f"A new ArgoCD application was created with this response:\n{json.dumps(resp, indent=2)}\n\n"
-                        f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
-                    )
-                    st.markdown("**Summary:**")
-                    st.write(pretty_create)
-
-                # fetch live application status if create successful
-                app_name_for_status = create_payload.get("name")
-                if app_name_for_status:
-                    status_resp = call_tool("get_application", {"application_name": app_name_for_status})
-                    # st.markdown("**Current Status (get_application):**")
-                    # st.json(status_resp)
-                    if GEMINI_AVAILABLE:
-                        pretty_status = ask_gemini(
-                            f"Here is the status of ArgoCD application '{app_name_for_status}':\n"
-                            f"{json.dumps(status_resp, indent=2)}\n\nExplain in human-friendly language the current sync status, health, and summary."
-                        )
-                        st.write(pretty_status)
-
-                # close the form-mode flow after attempt
-                st.session_state["create_flow_form"] = False
-
-        # stop further rendering of chat below while the form UI is up
-        return
-
     # Display chat history (main column)
     for msg in st.session_state["messages"]:
         role = msg.get("role", "assistant")
@@ -330,11 +257,6 @@ def main():
             st.chat_message("assistant").markdown(prompt)
             return
 
-        # legacy stepwise create flow kept (if you still want it enabled later)
-        if user_input.lower().strip() == "create application" and not st.session_state["create_flow"]:
-            # This branch is now skipped because above we opened the form.
-            pass
-
         # Normal flow: add user message then use Gemini tool-decider (if available)
         st.session_state["messages"].append({"role": "user", "content": user_input})
         st.chat_message("user").markdown(user_input)
@@ -349,21 +271,15 @@ def main():
                 f"🔧 Executing *{decision['tool']}* with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
             )
             response = call_tool(decision["tool"], decision["args"] or {})
-            # Present response
-            # st.write("Tool response:")
-            # st.json(response)
 
-            # use Gemini to make a human-friendly answer if available
             if GEMINI_AVAILABLE:
                 pretty_answer = ask_gemini(
-                    f"User asked: {user_input}\n\n"
-                    f"Here is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"User asked: {user_input}\n\nHere is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
                     f"Answer in natural human-friendly language. If multiple items (pods, apps, projects, services), format as bullet points."
                 )
                 st.session_state["messages"].append({"role": "assistant", "content": pretty_answer})
                 st.chat_message("assistant").markdown(pretty_answer)
             else:
-                # fallback: print raw JSON in chat history
                 fallback = json.dumps(response, indent=2)
                 st.session_state["messages"].append({"role": "assistant", "content": fallback})
                 st.chat_message("assistant").markdown(fallback)
