@@ -350,8 +350,8 @@ def main():
             )
             response = call_tool(decision["tool"], decision["args"] or {})
             # Present response
-            st.write("Tool response:")
-            st.json(response)
+            # st.write("Tool response:")
+            # st.json(response)
 
             # use Gemini to make a human-friendly answer if available
             if GEMINI_AVAILABLE:
