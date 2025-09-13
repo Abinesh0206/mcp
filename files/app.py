@@ -267,7 +267,26 @@ def main():
                 prompt = f"✅ Application data collected:\n```json\n{json.dumps(data, indent=2)}\n```\n\nNow creating application..."
                 # Call create tool
                 resp = call_tool("create_application", data)
-                prompt += f"\n\nResponse:\n```json\n{json.dumps(resp, indent=2)}\n```"
+
+                # Natural language summary for creation
+                pretty_create = ask_gemini(
+                    f"A new ArgoCD application was created with this response:\n"
+                    f"{json.dumps(resp, indent=2)}\n\n"
+                    f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
+                )
+                
+                # Fetch live application status
+                app_name = data["name"]
+                status_resp = call_tool("get_application", {"application_name": app_name})
+                
+                pretty_status = ask_gemini(
+                    f"Here is the status of ArgoCD application '{app_name}':\n"
+                    f"{json.dumps(status_resp, indent=2)}\n\n"
+                    f"Explain in human-friendly language the current sync status, health, and summary."
+                )
+                
+                prompt = f"✅ Application created successfully!\n\n{pretty_create}\n\n📊 Current Status:\n{pretty_status}"
+                
                 st.session_state["create_flow"] = None
 
             st.session_state["messages"].append({"role": "assistant", "content": prompt})
