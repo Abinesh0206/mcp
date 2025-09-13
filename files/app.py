@@ -1,5 +1,4 @@
 # app.py
-
 import os
 import json
 import requests
@@ -14,30 +13,39 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        GEMINI_AVAILABLE = True
+    except Exception:
+        GEMINI_AVAILABLE = False
+else:
+    GEMINI_AVAILABLE = False
 
-
-# ---------------- LOAD SERVERS ----------------
+# ---------------- SERVERS ----------------
 def load_servers():
     """Load server list from servers.json, fallback to default."""
     try:
         with open("servers.json") as f:
             data = json.load(f)
-        return data.get("servers", [])
-    except Exception as e:
+        return data.get("servers", []) or []
+    except Exception:
+        # fallback minimal server
         return [{
             "name": "default",
             "url": "http://127.0.0.1:3000/mcp",
-            "description": f"Fallback server: {e}"
+            "description": "Fallback server"
         }]
 
 
 servers = load_servers()
 
+if not servers:
+    servers = [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
+
 # Initialize current server in session state
 if "current_server" not in st.session_state:
     st.session_state["current_server"] = servers[0]["url"]
-
 
 def get_current_server_url():
     return st.session_state.get("current_server", servers[0]["url"])
@@ -45,14 +53,13 @@ def get_current_server_url():
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: dict = None):
-    """Call MCP server with JSON-RPC payload."""
+    """Call MCP server with JSON-RPC payload and return parsed JSON or error dict."""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params or {}
     }
-
     try:
         res = requests.post(
             get_current_server_url(),
@@ -64,29 +71,45 @@ def call_mcp_server(method: str, params: dict = None):
             timeout=30,
         )
         res.raise_for_status()
-
         text = res.text.strip()
-        if text.startswith("event:"):  # handle SSE style response
+        # handle SSE-ish response that contains lines with `data: {...}`
+        if text.startswith("event:") or "data:" in text:
             for line in text.splitlines():
                 if line.startswith("data:"):
-                    return json.loads(line[len("data:"):].strip())
-        return res.json()
+                    payload_text = line[len("data:"):].strip()
+                    try:
+                        return json.loads(payload_text)
+                    except Exception:
+                        # fallback to raw text
+                        return {"result": payload_text}
+        # normal JSON
+        try:
+            return res.json()
+        except ValueError:
+            return {"result": res.text}
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
 
 def list_mcp_tools():
-    """Fetch available MCP tools."""
+    """Fetch available MCP tools and return list of tool dicts."""
     resp = call_mcp_server("tools/list")
-    if "result" in resp and isinstance(resp["result"], dict):
-        return resp["result"].get("tools", [])
+    if not isinstance(resp, dict):
+        return []
+    # Some MCP servers return {"result": {"tools":[...]}} or {"result": [...]}
+    result = resp.get("result")
+    if isinstance(result, dict):
+        return result.get("tools", [])
+    if isinstance(result, list):
+        return result
     return []
 
 
 def call_tool(name: str, arguments: dict):
-    """Execute MCP tool by name with arguments."""
+    """Execute MCP tool by name with arguments. Returns parsed response dict."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
+    # keep the original structure for tool call
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments})
 
 
@@ -114,11 +137,14 @@ def humanize_age(created_at: str) -> str:
 
 
 def ask_gemini(prompt: str):
-    """Ask Gemini for free-text natural language generation."""
+    """Ask Gemini for free-text natural language generation (if available)."""
+    if not GEMINI_AVAILABLE:
+        return "Gemini not configured or unavailable."
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(prompt)
-        return response.text
+        # model.generate_content returns an object with .text
+        return response.text if hasattr(response, "text") else str(response)
     except Exception as e:
         return f"Gemini error: {str(e)}"
 
@@ -143,34 +169,30 @@ def sanitize_args(args: dict):
 
 
 def ask_gemini_for_tool_decision(query: str):
-    """Use Gemini to map user query -> MCP tool + arguments."""
+    """Use Gemini to map user query -> MCP tool + arguments. If Gemini not available, return null decision."""
     tools = list_mcp_tools()
     tool_names = [t["name"] for t in tools]
 
     instruction = f"""
-    You are an AI agent that maps user queries to MCP tools.
-    User query: "{query}"
+You are an AI agent that maps user queries to MCP tools.
+User query: "{query}"
 
-    Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
+Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
-    Rules:
-    - Only choose from the tools above.
-    - If the query clearly maps to a tool, return tool + args in JSON.
-    - If unsure, set tool=null and args=null.
+Rules:
+- Only choose from the tools above.
+- If the query clearly maps to a tool, return tool + args in JSON.
+- If unsure, set tool=null and args=null.
 
-    Respond ONLY in strict JSON:
-    {{
-      "tool": "<tool_name>" | null,
-      "args": {{}} | null,
-      "explanation": "Short explanation"
-    }}
-    """
-
+Respond ONLY in strict JSON:
+{{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
+"""
+    if not GEMINI_AVAILABLE:
+        return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
         text = response.text.strip()
-
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
@@ -179,11 +201,9 @@ def ask_gemini_for_tool_decision(query: str):
             if start != -1 and end != -1:
                 parsed = json.loads(text[start:end])
             else:
-                parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid: {text}"}
-
-        parsed["args"] = sanitize_args(parsed.get("args"))
+                parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+        parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
-
     except Exception as e:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
@@ -195,18 +215,25 @@ def main():
 
     # Sidebar: select MCP server
     st.sidebar.subheader("🌐 Select MCP Server")
-    server_names = [f"{s['name']} ({s['url']})" for s in servers]
-    choice = st.sidebar.radio("Available Servers:", server_names)
-    st.session_state["current_server"] = next(
-        s["url"] for s in servers if choice.startswith(s["name"])
-    )
+    server_options = [f"{s['name']} — {s['url']}" for s in servers]
+    choice = st.sidebar.radio("Available Servers:", server_options)
+    # map back to URL robustly
+    selected = next((s for s in servers if choice.startswith(s["name"])), servers[0])
+    st.session_state["current_server"] = selected["url"]
 
-    # Show tools for current server
+    # Quick action: open create application form
+    if "create_flow_form" not in st.session_state:
+        st.session_state["create_flow_form"] = False
+
+    if st.sidebar.button("Create ArgoCD Application (form)"):
+        st.session_state["create_flow_form"] = True
+
+    # Show tools for current server in sidebar
     tools = list_mcp_tools()
+    st.sidebar.subheader("🔧 Available MCP Tools")
     if tools:
-        st.sidebar.subheader("🔧 Available MCP Tools")
         for t in tools:
-            st.sidebar.write(f"- {t['name']}: {t.get('description','')}")
+            st.sidebar.write(f"- **{t.get('name','?')}**: {t.get('description','')}")
     else:
         st.sidebar.error("⚠ Could not fetch tools from MCP server.")
 
@@ -214,23 +241,89 @@ def main():
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
-    # Init create application flow
+    # Init create application stepwise flow
     if "create_flow" not in st.session_state:
         st.session_state["create_flow"] = None
         st.session_state["create_data"] = {}
 
-    # Display chat history
-    for msg in st.session_state["messages"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # If the form-mode create flow is active, show the full form (preferred UI)
+    if st.session_state["create_flow_form"]:
+        st.header("Create ArgoCD Application — Form")
+        with st.form("create_app_form"):
+            name = st.text_input("Application Name", value="")
+            project = st.text_input("Project Name", value="default")
+            repo_url = st.text_input("Repository URL", value="")
+            path = st.text_input("Path (in repo)", value="")
+            dest_ns = st.text_input("Destination Namespace", value="default")
+            cluster_url = st.text_input("Cluster URL", value="https://kubernetes.default.svc")
+            sync_policy = st.selectbox("Sync Policy", options=["Manual", "Automated"], index=0)
+            auto_create_ns = st.checkbox("Auto-Create Namespace", value=True)
+            prune = st.checkbox("Prune (remove resources not defined)", value=False)
+            server_side_apply = st.checkbox("Server-Side Apply", value=True)
+            submit_create = st.form_submit_button("Create Application")
 
-    # Chat input
+        if submit_create:
+            if not name or not repo_url or not path:
+                st.error("Please provide at least: Application Name, Repository URL, and Path.")
+            else:
+                create_payload = {
+                    "name": name,
+                    "project": project,
+                    "repo_url": repo_url,
+                    "path": path,
+                    "dest_ns": dest_ns,
+                    "cluster": cluster_url,
+                    "sync_policy": sync_policy.lower(),
+                    "auto_create_ns": bool(auto_create_ns),
+                    "prune": bool(prune),
+                    "server_side_apply": bool(server_side_apply),
+                }
+                st.info(f"Creating application `{name}`...")
+                resp = call_tool("create_application", create_payload)
+                st.write("Create response:")
+                st.json(resp)
+
+                # Natural language summary if gemini available
+                if GEMINI_AVAILABLE:
+                    pretty_create = ask_gemini(
+                        f"A new ArgoCD application was created with this response:\n{json.dumps(resp, indent=2)}\n\n"
+                        f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
+                    )
+                    st.markdown("**Summary:**")
+                    st.write(pretty_create)
+
+                # fetch live application status if create successful
+                app_name_for_status = create_payload.get("name")
+                if app_name_for_status:
+                    status_resp = call_tool("get_application", {"application_name": app_name_for_status})
+                    st.markdown("**Current Status (get_application):**")
+                    st.json(status_resp)
+                    if GEMINI_AVAILABLE:
+                        pretty_status = ask_gemini(
+                            f"Here is the status of ArgoCD application '{app_name_for_status}':\n"
+                            f"{json.dumps(status_resp, indent=2)}\n\nExplain in human-friendly language the current sync status, health, and summary."
+                        )
+                        st.write(pretty_status)
+
+                # close the form-mode flow after attempt
+                st.session_state["create_flow_form"] = False
+
+        # stop further rendering of chat below while the form UI is up
+        return
+
+    # Display chat history (main column)
+    for msg in st.session_state["messages"]:
+        role = msg.get("role", "assistant")
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
+
+    # Chat input area
     with st.form("user_input_form", clear_on_submit=True):
         user_input = st.text_input("Ask Kubernetes or ArgoCD something...")
         submitted = st.form_submit_button("Send")
 
     if submitted and user_input:
-        # Handle "create application" flow
+        # If user typed the legacy chat command to create application, start stepwise flow
         if user_input.lower().strip() == "create application" and not st.session_state["create_flow"]:
             st.session_state["create_flow"] = "name"
             st.session_state["create_data"] = {}
@@ -239,84 +332,113 @@ def main():
             st.chat_message("assistant").markdown(prompt)
             return
 
+        # handle the stepwise create flow (legacy)
         if st.session_state["create_flow"]:
             step = st.session_state["create_flow"]
             data = st.session_state["create_data"]
 
             if step == "name":
-                data["name"] = user_input
+                data["name"] = user_input.strip()
                 st.session_state["create_flow"] = "project"
                 prompt = "Please provide: project"
             elif step == "project":
-                data["project"] = user_input
+                data["project"] = user_input.strip()
                 st.session_state["create_flow"] = "repo_url"
                 prompt = "Please provide: repo_url"
             elif step == "repo_url":
-                data["repo_url"] = user_input
+                data["repo_url"] = user_input.strip()
                 st.session_state["create_flow"] = "path"
                 prompt = "Please provide: path"
             elif step == "path":
-                data["path"] = user_input
+                data["path"] = user_input.strip()
                 st.session_state["create_flow"] = "dest_ns"
                 prompt = "Please provide: dest_ns"
             elif step == "dest_ns":
-                data["dest_ns"] = user_input
+                data["dest_ns"] = user_input.strip()
                 st.session_state["create_flow"] = "done"
                 data["cluster"] = "https://kubernetes.default.svc"
+                # default sync policy — keep consistent with your other code
                 data["sync_policy"] = "automated"
                 prompt = f"✅ Application data collected:\n```json\n{json.dumps(data, indent=2)}\n```\n\nNow creating application..."
-                # Call create tool
-                resp = call_tool("create_application", data)
+                st.session_state["messages"].append({"role": "assistant", "content": prompt})
+                st.chat_message("assistant").markdown(prompt)
 
-                # Natural language summary for creation
-                pretty_create = ask_gemini(
-                    f"A new ArgoCD application was created with this response:\n"
-                    f"{json.dumps(resp, indent=2)}\n\n"
-                    f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
-                )
-                
-                # Fetch live application status
+                # Call create tool (sanitized)
+                resp = call_tool("create_application", data)
+                st.write("Create response:")
+                st.json(resp)
+
+                # Natural language summary for creation (if available)
+                if GEMINI_AVAILABLE:
+                    pretty_create = ask_gemini(
+                        f"A new ArgoCD application was created with this response:\n"
+                        f"{json.dumps(resp, indent=2)}\n\n"
+                        f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
+                    )
+                    st.markdown("**Summary:**")
+                    st.write(pretty_create)
+
+                # Fetch application status
                 app_name = data["name"]
                 status_resp = call_tool("get_application", {"application_name": app_name})
-                
-                pretty_status = ask_gemini(
-                    f"Here is the status of ArgoCD application '{app_name}':\n"
-                    f"{json.dumps(status_resp, indent=2)}\n\n"
-                    f"Explain in human-friendly language the current sync status, health, and summary."
-                )
-                
-                prompt = f"✅ Application created successfully!\n\n{pretty_create}\n\n📊 Current Status:\n{pretty_status}"
-                
-                st.session_state["create_flow"] = None
+                st.markdown("**Current Status (get_application):**")
+                st.json(status_resp)
 
+                if GEMINI_AVAILABLE:
+                    pretty_status = ask_gemini(
+                        f"Here is the status of ArgoCD application '{app_name}':\n"
+                        f"{json.dumps(status_resp, indent=2)}\n\n"
+                        f"Explain in human-friendly language the current sync status, health, and summary."
+                    )
+                    st.write(pretty_status)
+
+                st.session_state["create_flow"] = None
+                st.session_state["create_data"] = {}
+                return
+
+            # push intermediate prompt message and return so user can continue steps
             st.session_state["messages"].append({"role": "assistant", "content": prompt})
             st.chat_message("assistant").markdown(prompt)
             return
 
-        # Normal flow (Gemini + MCP)
+        # Normal flow: add user message then use Gemini tool-decider (if available)
         st.session_state["messages"].append({"role": "user", "content": user_input})
         st.chat_message("user").markdown(user_input)
 
         decision = ask_gemini_for_tool_decision(user_input)
-        explanation = f"💡 {decision.get('explanation','')}"
+        explanation = f"💡 {decision.get('explanation', '')}"
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
         st.chat_message("assistant").markdown(explanation)
 
-        if decision["tool"]:
+        if decision.get("tool"):
             st.chat_message("assistant").markdown(
                 f"🔧 Executing *{decision['tool']}* with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
             )
-            response = call_tool(decision["tool"], decision["args"])
-            pretty_answer = ask_gemini(
-                f"User asked: {user_input}\n\n"
-                f"Here is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
-                f"Answer in natural human-friendly language. "
-                f"If multiple items (pods, apps, projects, services), format as bullet points."
-            )
-            st.session_state["messages"].append({"role": "assistant", "content": pretty_answer})
-            st.chat_message("assistant").markdown(pretty_answer)
+            response = call_tool(decision["tool"], decision["args"] or {})
+            # Present response
+            st.write("Tool response:")
+            st.json(response)
+
+            # use Gemini to make a human-friendly answer if available
+            if GEMINI_AVAILABLE:
+                pretty_answer = ask_gemini(
+                    f"User asked: {user_input}\n\n"
+                    f"Here is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
+                    f"Answer in natural human-friendly language. If multiple items (pods, apps, projects, services), format as bullet points."
+                )
+                st.session_state["messages"].append({"role": "assistant", "content": pretty_answer})
+                st.chat_message("assistant").markdown(pretty_answer)
+            else:
+                # fallback: print raw JSON in chat history
+                fallback = json.dumps(response, indent=2)
+                st.session_state["messages"].append({"role": "assistant", "content": fallback})
+                st.chat_message("assistant").markdown(fallback)
         else:
-            answer = ask_gemini(user_input)
+            # No tool decided: fallback to plain Gemini chat or echo fallback
+            if GEMINI_AVAILABLE:
+                answer = ask_gemini(user_input)
+            else:
+                answer = "No tool selected and Gemini not available. Please use a direct command or the Create Application form."
             st.session_state["messages"].append({"role": "assistant", "content": answer})
             st.chat_message("assistant").markdown(answer)
 
