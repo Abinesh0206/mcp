@@ -1,3 +1,10 @@
+# ---------------- TOOL ARGUMENT REQUIREMENTS ----------------
+TOOL_ARGUMENTS = {
+    "sync_application": ["application_name"],
+    "get_application": ["application_name"],
+    "create_application": ["name", "repo_url", "path", "dest_ns", "sync_policy"],
+}
+
 # app.py
 
 import os
