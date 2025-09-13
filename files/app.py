@@ -1,10 +1,3 @@
-# ---------------- TOOL ARGUMENT REQUIREMENTS ----------------
-TOOL_ARGUMENTS = {
-    "sync_application": ["application_name"],
-    "get_application": ["application_name"],
-    "create_application": ["name", "repo_url", "path", "dest_ns", "sync_policy"],
-}
-
 # app.py
 
 import os
@@ -14,7 +7,6 @@ import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime, timezone
-
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -222,6 +214,11 @@ def main():
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
+    # Init create application flow
+    if "create_flow" not in st.session_state:
+        st.session_state["create_flow"] = None
+        st.session_state["create_data"] = {}
+
     # Display chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg["role"]):
@@ -233,38 +230,73 @@ def main():
         submitted = st.form_submit_button("Send")
 
     if submitted and user_input:
-        # Store user message
+        # Handle "create application" flow
+        if user_input.lower().strip() == "create application" and not st.session_state["create_flow"]:
+            st.session_state["create_flow"] = "name"
+            st.session_state["create_data"] = {}
+            prompt = "Please provide: name"
+            st.session_state["messages"].append({"role": "assistant", "content": prompt})
+            st.chat_message("assistant").markdown(prompt)
+            return
+
+        if st.session_state["create_flow"]:
+            step = st.session_state["create_flow"]
+            data = st.session_state["create_data"]
+
+            if step == "name":
+                data["name"] = user_input
+                st.session_state["create_flow"] = "project"
+                prompt = "Please provide: project"
+            elif step == "project":
+                data["project"] = user_input
+                st.session_state["create_flow"] = "repo_url"
+                prompt = "Please provide: repo_url"
+            elif step == "repo_url":
+                data["repo_url"] = user_input
+                st.session_state["create_flow"] = "path"
+                prompt = "Please provide: path"
+            elif step == "path":
+                data["path"] = user_input
+                st.session_state["create_flow"] = "dest_ns"
+                prompt = "Please provide: dest_ns"
+            elif step == "dest_ns":
+                data["dest_ns"] = user_input
+                st.session_state["create_flow"] = "done"
+                data["cluster"] = "https://kubernetes.default.svc"
+                data["sync_policy"] = "automated"
+                prompt = f"✅ Application data collected:\n```json\n{json.dumps(data, indent=2)}\n```\n\nNow creating application..."
+                # Call create tool
+                resp = call_tool("create_application", data)
+                prompt += f"\n\nResponse:\n```json\n{json.dumps(resp, indent=2)}\n```"
+                st.session_state["create_flow"] = None
+
+            st.session_state["messages"].append({"role": "assistant", "content": prompt})
+            st.chat_message("assistant").markdown(prompt)
+            return
+
+        # Normal flow (Gemini + MCP)
         st.session_state["messages"].append({"role": "user", "content": user_input})
         st.chat_message("user").markdown(user_input)
 
-        # Tool decision
         decision = ask_gemini_for_tool_decision(user_input)
         explanation = f"💡 {decision.get('explanation','')}"
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
         st.chat_message("assistant").markdown(explanation)
 
         if decision["tool"]:
-            # Show tool execution
             st.chat_message("assistant").markdown(
                 f"🔧 Executing *{decision['tool']}* with arguments:\n```json\n{json.dumps(decision['args'], indent=2)}\n```"
             )
-
-            # Call tool
             response = call_tool(decision["tool"], decision["args"])
-
-            # Ask Gemini to prettify response
             pretty_answer = ask_gemini(
                 f"User asked: {user_input}\n\n"
                 f"Here is the raw MCP response:\n{json.dumps(response, indent=2)}\n\n"
                 f"Answer in natural human-friendly language. "
                 f"If multiple items (pods, apps, projects, services), format as bullet points."
             )
-
             st.session_state["messages"].append({"role": "assistant", "content": pretty_answer})
             st.chat_message("assistant").markdown(pretty_answer)
-
         else:
-            # No matching tool, fallback to Gemini free-text answer
             answer = ask_gemini(user_input)
             st.session_state["messages"].append({"role": "assistant", "content": answer})
             st.chat_message("assistant").markdown(answer)
