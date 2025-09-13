@@ -279,8 +279,8 @@ def main():
                 }
                 st.info(f"Creating application `{name}`...")
                 resp = call_tool("create_application", create_payload)
-                st.write("Create response:")
-                st.json(resp)
+                # st.write("Create response:")
+                # st.json(resp)
 
                 # Natural language summary if gemini available
                 if GEMINI_AVAILABLE:
