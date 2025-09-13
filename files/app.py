@@ -37,7 +37,6 @@ def load_servers():
             "description": "Fallback server"
         }]
 
-
 servers = load_servers()
 
 if not servers:
@@ -221,12 +220,8 @@ def main():
     selected = next((s for s in servers if choice.startswith(s["name"])), servers[0])
     st.session_state["current_server"] = selected["url"]
 
-    # Quick action: open create application form
-    if "create_flow_form" not in st.session_state:
-        st.session_state["create_flow_form"] = False
-
-    if st.sidebar.button("Create ArgoCD Application (form)"):
-        st.session_state["create_flow_form"] = True
+    # NOTE: Sidebar button removed intentionally.
+    # The form will open only when the user types "create application" in the chat input.
 
     # Show tools for current server in sidebar
     tools = list_mcp_tools()
@@ -241,7 +236,11 @@ def main():
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
-    # Init create application stepwise flow
+    # Init create application form flow
+    if "create_flow_form" not in st.session_state:
+        st.session_state["create_flow_form"] = False
+
+    # Init legacy stepwise flow state kept but disabled by default
     if "create_flow" not in st.session_state:
         st.session_state["create_flow"] = None
         st.session_state["create_data"] = {}
@@ -323,83 +322,18 @@ def main():
         submitted = st.form_submit_button("Send")
 
     if submitted and user_input:
-        # If user typed the legacy chat command to create application, start stepwise flow
+        # If user typed "create application" open the form-mode flow
+        if user_input.lower().strip() == "create application" and not st.session_state["create_flow_form"]:
+            st.session_state["create_flow_form"] = True
+            prompt = "Opening Create ArgoCD Application form..."
+            st.session_state["messages"].append({"role": "assistant", "content": prompt})
+            st.chat_message("assistant").markdown(prompt)
+            return
+
+        # legacy stepwise create flow kept (if you still want it enabled later)
         if user_input.lower().strip() == "create application" and not st.session_state["create_flow"]:
-            st.session_state["create_flow"] = "name"
-            st.session_state["create_data"] = {}
-            prompt = "Please provide: name"
-            st.session_state["messages"].append({"role": "assistant", "content": prompt})
-            st.chat_message("assistant").markdown(prompt)
-            return
-
-        # handle the stepwise create flow (legacy)
-        if st.session_state["create_flow"]:
-            step = st.session_state["create_flow"]
-            data = st.session_state["create_data"]
-
-            if step == "name":
-                data["name"] = user_input.strip()
-                st.session_state["create_flow"] = "project"
-                prompt = "Please provide: project"
-            elif step == "project":
-                data["project"] = user_input.strip()
-                st.session_state["create_flow"] = "repo_url"
-                prompt = "Please provide: repo_url"
-            elif step == "repo_url":
-                data["repo_url"] = user_input.strip()
-                st.session_state["create_flow"] = "path"
-                prompt = "Please provide: path"
-            elif step == "path":
-                data["path"] = user_input.strip()
-                st.session_state["create_flow"] = "dest_ns"
-                prompt = "Please provide: dest_ns"
-            elif step == "dest_ns":
-                data["dest_ns"] = user_input.strip()
-                st.session_state["create_flow"] = "done"
-                data["cluster"] = "https://kubernetes.default.svc"
-                # default sync policy — keep consistent with your other code
-                data["sync_policy"] = "automated"
-                prompt = f"✅ Application data collected:\n```json\n{json.dumps(data, indent=2)}\n```\n\nNow creating application..."
-                st.session_state["messages"].append({"role": "assistant", "content": prompt})
-                st.chat_message("assistant").markdown(prompt)
-
-                # Call create tool (sanitized)
-                resp = call_tool("create_application", data)
-                st.write("Create response:")
-                st.json(resp)
-
-                # Natural language summary for creation (if available)
-                if GEMINI_AVAILABLE:
-                    pretty_create = ask_gemini(
-                        f"A new ArgoCD application was created with this response:\n"
-                        f"{json.dumps(resp, indent=2)}\n\n"
-                        f"Explain clearly in human language what was created (name, namespace, repo, path, cluster, project)."
-                    )
-                    st.markdown("**Summary:**")
-                    st.write(pretty_create)
-
-                # Fetch application status
-                app_name = data["name"]
-                status_resp = call_tool("get_application", {"application_name": app_name})
-                st.markdown("**Current Status (get_application):**")
-                st.json(status_resp)
-
-                if GEMINI_AVAILABLE:
-                    pretty_status = ask_gemini(
-                        f"Here is the status of ArgoCD application '{app_name}':\n"
-                        f"{json.dumps(status_resp, indent=2)}\n\n"
-                        f"Explain in human-friendly language the current sync status, health, and summary."
-                    )
-                    st.write(pretty_status)
-
-                st.session_state["create_flow"] = None
-                st.session_state["create_data"] = {}
-                return
-
-            # push intermediate prompt message and return so user can continue steps
-            st.session_state["messages"].append({"role": "assistant", "content": prompt})
-            st.chat_message("assistant").markdown(prompt)
-            return
+            # This branch is now skipped because above we opened the form.
+            pass
 
         # Normal flow: add user message then use Gemini tool-decider (if available)
         st.session_state["messages"].append({"role": "user", "content": user_input})
