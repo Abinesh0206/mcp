@@ -151,15 +151,29 @@ Respond in strict JSON:
         return {"server": None, "tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
 
+# ---------------- SERVER HEALTH CHECK ----------------
+def check_server_health(server_url: str) -> bool:
+    """Check if MCP server is reachable by calling tools/list."""
+    try:
+        res = call_mcp_server("tools/list", server_url=server_url)
+        if isinstance(res, dict) and ("result" in res):
+            return True
+        return False
+    except Exception:
+        return False
+
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
-    # Sidebar: show servers
+    # Sidebar: show servers with health check
     st.sidebar.subheader("🌐 MCP Servers")
     for s in servers:
-        st.sidebar.write(f"- **{s['name']}** — {s['url']}")
+        healthy = check_server_health(s["url"])
+        status_icon = "✅" if healthy else "❌"
+        color = "green" if healthy else "red"
+        st.sidebar.markdown(f"- **{s['name']}** <span style='color:{color}'>{status_icon}</span>", unsafe_allow_html=True)
 
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -215,6 +229,7 @@ def main():
                 answer = "No tool selected and Gemini not available."
             st.session_state["messages"].append({"role": "assistant", "content": answer})
             st.chat_message("assistant").markdown(answer)
+
 
 
 if __name__ == "__main__":
