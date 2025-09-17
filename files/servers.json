@@ -12,7 +12,7 @@
     },
     {
       "name": "jenkins-mcp",
-      "url": "http://3.80.48.199:8080",
+      "url": "http://3.80.48.199:8080/mcp",
       "description": "Staging Kubernetes MCP server"
     }
   ]
