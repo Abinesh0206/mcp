@@ -9,7 +9,7 @@ import google.generativeai as genai
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBlx9uMCC18Uaw4LdhmXmQxsYlpf2DBONo")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini SDK
