@@ -29,36 +29,40 @@ def load_servers() -> list:
             data = json.load(f)
         return data.get("servers", []) or []
     except Exception:
-        return [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
+        return [
+            {"name": "kubernetes-mcp", "url": "http://127.0.0.1:3001/mcp"},
+            {"name": "argocd-mcp", "url": "http://127.0.0.1:3002/mcp"},
+            {"name": "jenkins-mcp", "url": "http://127.0.0.1:3003/mcp"},
+        ]
 
 servers = load_servers()
 if not servers:
-    servers = [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
+    servers = [
+        {"name": "kubernetes-mcp", "url": "http://127.0.0.1:3001/mcp"},
+        {"name": "argocd-mcp", "url": "http://127.0.0.1:3002/mcp"},
+        {"name": "jenkins-mcp", "url": "http://127.0.0.1:3003/mcp"},
+    ]
 
 # ---------------- HELPERS ----------------
-def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
+def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 5) -> Dict[str, Any]:
     url = server_url or servers[0]["url"]
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream, */*"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
-        text = res.text.strip() if res.text else ""
-        if text.startswith("event:") or "data:" in text:
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("data:"):
-                    payload_text = line[len("data:"):].strip()
-                    try:
-                        return json.loads(payload_text)
-                    except Exception:
-                        return {"result": payload_text}
-        try:
-            return res.json()
-        except ValueError:
-            return {"result": res.text}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"MCP server request failed: {str(e)}"}
+        return res.json()
+    except Exception:
+        return {"error": "unreachable"}
+
+def check_server_health(url: str) -> bool:
+    try:
+        resp = call_mcp_server("health", server_url=url)
+        if resp and not resp.get("error"):
+            return True
+    except Exception:
+        pass
+    return False
 
 def list_mcp_tools(server_url: Optional[str] = None) -> list:
     resp = call_mcp_server("tools/list", server_url=server_url)
@@ -129,7 +133,7 @@ If unsure, set tool and server to null.
             return parsed
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2)  # wait and retry
+                time.sleep(2)
                 continue
             return {"tool": None, "args": None, "server": None, "explanation": f"Gemini error: {str(e)}"}
 
@@ -156,6 +160,12 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
+    # ---- Sidebar with Server Status ----
+    st.sidebar.title("🌐 MCP Servers")
+    for s in servers:
+        status = "✅" if check_server_health(s["url"]) else "❌"
+        st.sidebar.write(f"{s['name']} {status}")
+
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
@@ -171,13 +181,11 @@ def main():
         st.session_state["messages"].append({"role": "user", "content": user_prompt})
         st.chat_message("user").markdown(user_prompt)
 
-        # Ask Gemini for both tool and server
         decision = ask_gemini_for_tool_and_server(user_prompt)
         explanation = f"💡 {decision.get('explanation', '')}" if decision.get("explanation") else "💡 Tool decision produced."
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
         st.chat_message("assistant").markdown(explanation)
 
-        # Determine server URL
         server_name = decision.get("server")
         server_url = None
         if server_name:
@@ -186,13 +194,14 @@ def main():
                     server_url = s["url"]
                     break
         if not server_url:
-            server_url = servers[0]["url"]  # fallback
+            server_url = servers[0]["url"]
 
-        # Execute tool if selected
         tool_name = decision.get("tool")
         if tool_name:
             tool_args = decision.get("args") or {}
-            st.chat_message("assistant").markdown(f"🔧 Executing *{tool_name}* on server `{server_name}` with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```")
+            st.chat_message("assistant").markdown(
+                f"🔧 Executing *{tool_name}* on server `{server_name}` with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```"
+            )
             resp = call_tool(tool_name, tool_args, server_url=server_url)
 
             if not resp or "error" in resp:
