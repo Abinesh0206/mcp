@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBlx9uMCC18Uaw4LdhmXmQxsYlpf2DBONo")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini SDK
@@ -68,9 +68,14 @@ def call_mcp_server(method: str, params: dict = None, server_url: str = None):
 
 
 def check_server_health(server_url: str):
-    """Try tools/list to see if server is healthy"""
+    """Check server health: try 'health' first, fallback to 'tools/list'"""
+    # Try health method first
+    resp = call_mcp_server("health", server_url=server_url)
+    if isinstance(resp, dict) and "result" in resp:
+        return True
+    # Fallback to tools/list
     resp = call_mcp_server("tools/list", server_url=server_url)
-    return "result" in resp
+    return isinstance(resp, dict) and "result" in resp
 
 
 def list_mcp_tools():
@@ -179,7 +184,7 @@ def main():
             response = call_tool(decision["tool"], decision["args"])
             final_answer = ask_gemini_answer(prompt, response)
         else:
-            final_answer = ask_gemini(prompt) if GEMINI_AVAILABLE else "No tool available."
+            final_answer = "No tool available." if not GEMINI_AVAILABLE else "Gemini couldn't pick a tool."
 
         st.session_state["messages"].append({"role": "assistant", "content": final_answer})
         st.chat_message("assistant").markdown(final_answer)
