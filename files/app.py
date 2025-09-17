@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+import time
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -97,11 +98,11 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 # ---------------- GEMINI DECISIONS ----------------
-def ask_gemini_for_tool_and_server(query: str) -> Dict[str, Any]:
+def ask_gemini_for_tool_and_server(query: str, retries: int = 2) -> Dict[str, Any]:
     tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"])]
     server_names = [s["name"] for s in servers]
     instruction = f"""
-You are an AI agent that maps a user's short query to an MCP tool call and selects the best MCP server.
+You are an AI agent that maps a user's query to an MCP tool call and selects the best MCP server.
 User query: "{query}"
 Available servers: {json.dumps(server_names)}
 Available tools: {json.dumps(tool_names)}
@@ -111,21 +112,28 @@ If unsure, set tool and server to null.
 """
     if not GEMINI_AVAILABLE:
         return {"tool": None, "args": None, "server": None, "explanation": "Gemini not configured; fallback."}
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        resp = model.generate_content(instruction)
-        text = getattr(resp, "text", str(resp)).strip()
-        parsed = None
+
+    for attempt in range(retries):
         try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = _extract_json_from_text(text)
-        if not isinstance(parsed, dict):
-            return {"tool": None, "args": None, "server": None, "explanation": f"Gemini response couldn't be parsed: {text[:200]}"}
-        parsed["args"] = sanitize_args(parsed.get("args") or {})
-        return parsed
-    except Exception as e:
-        return {"tool": None, "args": None, "server": None, "explanation": f"Gemini error: {str(e)}"}
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            resp = model.generate_content(instruction)
+            text = getattr(resp, "text", str(resp)).strip()
+            parsed = None
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = _extract_json_from_text(text)
+            if not isinstance(parsed, dict):
+                continue
+            parsed["args"] = sanitize_args(parsed.get("args") or {})
+            return parsed
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2)  # wait and retry
+                continue
+            return {"tool": None, "args": None, "server": None, "explanation": f"Gemini error: {str(e)}"}
+
+    return {"tool": None, "args": None, "server": None, "explanation": "Gemini failed after retries."}
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
     if not GEMINI_AVAILABLE:
@@ -135,7 +143,8 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Convert to concise, human-friendly answer. Use bullets if multiple items."
+            "Convert this into a detailed, human-friendly explanation. "
+            "If it's a list, format with bullet points. If it's status, explain health and issues clearly."
         )
         resp = model.generate_content(prompt)
         return getattr(resp, "text", str(resp)).strip()
@@ -185,11 +194,16 @@ def main():
             tool_args = decision.get("args") or {}
             st.chat_message("assistant").markdown(f"🔧 Executing *{tool_name}* on server `{server_name}` with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```")
             resp = call_tool(tool_name, tool_args, server_url=server_url)
-            final_answer = ask_gemini_answer(user_prompt, resp)
+
+            if not resp or "error" in resp:
+                final_answer = f"⚠️ No valid response received. {resp.get('error', 'Unknown error') if isinstance(resp, dict) else ''}"
+            else:
+                final_answer = ask_gemini_answer(user_prompt, resp)
+
             st.session_state["messages"].append({"role": "assistant", "content": final_answer})
             st.chat_message("assistant").markdown(final_answer)
         else:
-            answer = "No tool selected. Try a direct command or check MCP server tools."
+            answer = "⚠️ No tool selected. Try again or check available MCP tools."
             st.session_state["messages"].append({"role": "assistant", "content": answer})
             st.chat_message("assistant").markdown(answer)
 
