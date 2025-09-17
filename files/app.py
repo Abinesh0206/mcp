@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBlX7pO8jgKdHw_a01GwdDRfZ0ihk4EPvY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeUhwJf1-qRz2wy3y680JNXmpcG6LkfhQ")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Configure Gemini SDK if available
