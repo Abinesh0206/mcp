@@ -49,8 +49,7 @@ def get_current_server_url() -> str:
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
-    """Call MCP server with JSON-RPC and return parsed result or error dict.
-       Handles both normal JSON and simple SSE-like responses containing lines 'data: {...}'."""
+    """Call MCP server with JSON-RPC and return parsed result or error dict."""
     url = server_url or get_current_server_url()
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     headers = {
@@ -62,7 +61,6 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
         res.raise_for_status()
         text = res.text or ""
         text = text.strip()
-        # SSE-ish: search for first "data:" JSON content
         if text.startswith("event:") or "data:" in text:
             for line in text.splitlines():
                 line = line.strip()
@@ -72,11 +70,9 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
                         return json.loads(payload_text)
                     except Exception:
                         return {"result": payload_text}
-        # Try normal JSON
         try:
             return res.json()
         except ValueError:
-            # not JSON, return raw text under result
             return {"result": res.text}
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
@@ -89,7 +85,6 @@ def check_server_health(server_url: str) -> bool:
             return True
     except Exception:
         pass
-    # fallback
     try:
         resp = call_mcp_server("tools/list", server_url=server_url, timeout=6)
         if isinstance(resp, dict) and "result" in resp:
@@ -146,7 +141,6 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return fixed
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
-    """Try to extract a JSON object substring from a free text response."""
     try:
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -157,7 +151,6 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 def ask_gemini_for_tool_decision(query: str) -> Dict[str, Any]:
-    """Ask Gemini to map natural query -> {'tool':name or None, 'args':{}}"""
     tools = list_mcp_tools()
     tool_names = [t.get("name") for t in tools]
     instruction = f"""
@@ -175,7 +168,6 @@ If unsure, set tool to null and args to null.
         resp = model.generate_content(instruction)
         text = getattr(resp, "text", str(resp)).strip()
         parsed = None
-        # try direct parse
         try:
             parsed = json.loads(text)
         except Exception:
@@ -188,7 +180,6 @@ If unsure, set tool to null and args to null.
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Ask Gemini to convert raw MCP response to friendly text (if available)."""
     if not GEMINI_AVAILABLE:
         return json.dumps(raw_response, indent=2)
     try:
@@ -208,25 +199,15 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
-    # Sidebar: server statuses + selection
+    # Sidebar: show only server name + status
     st.sidebar.subheader("🌐 MCP Servers")
     for s in servers:
         try:
-            # lightweight check: requests head with very short timeout
-            import requests
             resp = requests.head(s["url"], timeout=1)
             status_icon = "✅" if resp.status_code < 400 else "❌"
         except Exception:
             status_icon = "❌"
-    st.sidebar.markdown(f"**{s['name']}** — {s['url']} {status_icon}")
-
-
-    server_options = [f"{s['name']} — {s['url']}" for s in servers]
-    choice = st.sidebar.radio("Active Server:", server_options)
-    selected = next((s for s in servers if choice.startswith(s["name"])), servers[0])
-    st.session_state["current_server"] = selected["url"]
-
-    # Sidebar: tools
+        st.sidebar.markdown(f"**{s['name']}** {status_icon}")
 
     # Initialize chat history
     if "messages" not in st.session_state:
@@ -256,7 +237,6 @@ def main():
             st.session_state["messages"].append({"role": "assistant", "content": "Create application flow cancelled."})
             st.experimental_rerun()
         if submit_create:
-            # Build args object
             args = {
                 "name": app_name,
                 "project": project,
@@ -264,9 +244,8 @@ def main():
                 "path": path,
                 "dest_ns": dest_ns
             }
-            # Try to find a likely tool to call (heuristic)
             candidate = None
-            for t in tools:
+            for t in list_mcp_tools():
                 n = t.get("name", "").lower()
                 if "create" in n and "app" in n or "application" in n:
                     candidate = t.get("name")
@@ -281,13 +260,12 @@ def main():
                 st.session_state["messages"].append({"role": "assistant", "content": "No create-application tool found on this MCP server; showing JSON payload instead."})
             st.experimental_rerun()
 
-    # Chat input area (use chat_input if available)
+    # Chat input area
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
     if user_prompt:
         st.session_state["messages"].append({"role": "user", "content": user_prompt})
         st.chat_message("user").markdown(user_prompt)
 
-        # special-case: open create app form
         if user_prompt.strip().lower() == "create application" and not st.session_state["create_flow_form"]:
             st.session_state["create_flow_form"] = True
             prompt = "Opening Create ArgoCD Application form..."
@@ -295,13 +273,11 @@ def main():
             st.chat_message("assistant").markdown(prompt)
             st.experimental_rerun()
 
-        # Ask Gemini to pick a tool (best-effort)
         decision = ask_gemini_for_tool_decision(user_prompt)
         explanation = f"💡 {decision.get('explanation', '')}" if decision.get("explanation") else "💡 Tool decision produced."
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
         st.chat_message("assistant").markdown(explanation)
 
-        # If Gemini selected a tool, call it
         if decision.get("tool"):
             tool_name = decision["tool"]
             tool_args = decision.get("args") or {}
@@ -311,7 +287,6 @@ def main():
             st.session_state["messages"].append({"role": "assistant", "content": final_answer})
             st.chat_message("assistant").markdown(final_answer)
         else:
-            # No tool chosen: if Gemini available, fallback to general chat; else give guidance
             if GEMINI_AVAILABLE:
                 answer = ask_gemini_answer(user_prompt, {"note": "No tool selected; performing chat fallback."})
             else:
