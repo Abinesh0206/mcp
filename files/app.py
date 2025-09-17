@@ -211,9 +211,15 @@ def main():
     # Sidebar: server statuses + selection
     st.sidebar.subheader("🌐 MCP Servers")
     for s in servers:
-        status_icon = "✅" if check_server_health(s["url"]) else "❌"
-        st.sidebar.markdown(f"**{s['name']}** — {s['url']} {status_icon}")
-    st.sidebar.markdown("---")
+        try:
+            # lightweight check: requests head with very short timeout
+            import requests
+            resp = requests.head(s["url"], timeout=1)
+            status_icon = "✅" if resp.status_code < 400 else "❌"
+        except Exception:
+            status_icon = "❌"
+    st.sidebar.markdown(f"**{s['name']}** — {s['url']} {status_icon}")
+
 
     server_options = [f"{s['name']} — {s['url']}" for s in servers]
     choice = st.sidebar.radio("Active Server:", server_options)
@@ -221,15 +227,6 @@ def main():
     st.session_state["current_server"] = selected["url"]
 
     # Sidebar: tools
-    st.sidebar.subheader("🔧 Available MCP Tools")
-    tools = list_mcp_tools()
-    if tools:
-        for t in tools:
-            name = t.get("name", "?")
-            desc = t.get("description", "")
-            st.sidebar.markdown(f"- **{name}** — {desc}")
-    else:
-        st.sidebar.info("No tools available or couldn't fetch tools from server.")
 
     # Initialize chat history
     if "messages" not in st.session_state:
