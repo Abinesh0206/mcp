@@ -49,18 +49,13 @@ def get_current_server_url() -> str:
 
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
-    """Call MCP server with JSON-RPC and return parsed result or error dict."""
     url = server_url or get_current_server_url()
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream, */*",
-    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream, */*"}
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
-        text = res.text or ""
-        text = text.strip()
+        text = res.text.strip() if res.text else ""
         if text.startswith("event:") or "data:" in text:
             for line in text.splitlines():
                 line = line.strip()
@@ -78,7 +73,6 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
         return {"error": f"MCP server request failed: {str(e)}"}
 
 def check_server_health(server_url: str) -> bool:
-    """Try 'health' method first; fallback to 'tools/list' to infer availability."""
     try:
         resp = call_mcp_server("health", server_url=server_url, timeout=6)
         if isinstance(resp, dict) and ("result" in resp or "status" in resp):
@@ -199,14 +193,13 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
-    # Sidebar: show only server name + status
+    # ---------------- SIDEBAR ----------------
     st.sidebar.subheader("🌐 MCP Servers")
     for s in servers:
-        try:
-            resp = requests.head(s["url"], timeout=1)
-            status_icon = "✅" if resp.status_code < 400 else "❌"
-        except Exception:
-            status_icon = "❌"
+        status_icon = "❌"
+        # Keep original server connection logic
+        if check_server_health(s["url"]):
+            status_icon = "✅"
         st.sidebar.markdown(f"**{s['name']}** {status_icon}")
 
     # Initialize chat history
@@ -221,7 +214,7 @@ def main():
         with st.chat_message(role):
             st.markdown(msg.get("content", ""))
 
-    # If create application flow is active, show the form
+    # Create application flow
     if st.session_state["create_flow_form"]:
         st.markdown("### Create ArgoCD Application — Form")
         with st.form("create_app_form"):
@@ -237,17 +230,11 @@ def main():
             st.session_state["messages"].append({"role": "assistant", "content": "Create application flow cancelled."})
             st.experimental_rerun()
         if submit_create:
-            args = {
-                "name": app_name,
-                "project": project,
-                "repo_url": repo_url,
-                "path": path,
-                "dest_ns": dest_ns
-            }
+            args = {"name": app_name, "project": project, "repo_url": repo_url, "path": path, "dest_ns": dest_ns}
             candidate = None
             for t in list_mcp_tools():
                 n = t.get("name", "").lower()
-                if "create" in n and "app" in n or "application" in n:
+                if "create" in n and ("app" in n or "application" in n):
                     candidate = t.get("name")
                     break
             st.session_state["create_flow_form"] = False
@@ -257,10 +244,10 @@ def main():
                 pretty = ask_gemini_answer("Create ArgoCD Application", resp)
                 st.session_state["messages"].append({"role": "assistant", "content": pretty})
             else:
-                st.session_state["messages"].append({"role": "assistant", "content": "No create-application tool found on this MCP server; showing JSON payload instead."})
+                st.session_state["messages"].append({"role": "assistant", "content": "No create-application tool found; showing JSON payload instead."})
             st.experimental_rerun()
 
-    # Chat input area
+    # Chat input
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
     if user_prompt:
         st.session_state["messages"].append({"role": "user", "content": user_prompt})
