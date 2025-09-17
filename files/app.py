@@ -13,7 +13,6 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeUhwJf1-qRz2wy3y680JNXmpcG6LkfhQ")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-# Configure Gemini SDK if available
 GEMINI_AVAILABLE = False
 if GEMINI_API_KEY:
     try:
@@ -24,32 +23,20 @@ if GEMINI_API_KEY:
 
 # ---------------- SERVERS ----------------
 def load_servers() -> list:
-    """Load server list from servers.json, fallback to single default server."""
     try:
         with open("servers.json") as f:
             data = json.load(f)
         return data.get("servers", []) or []
     except Exception:
-        return [{
-            "name": "default",
-            "url": "http://127.0.0.1:3000/mcp",
-            "description": "Fallback server"
-        }]
+        return [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
 
 servers = load_servers()
 if not servers:
     servers = [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
 
-# Ensure current_server in session state
-if "current_server" not in st.session_state:
-    st.session_state["current_server"] = servers[0]["url"]
-
-def get_current_server_url() -> str:
-    return st.session_state.get("current_server", servers[0]["url"])
-
 # ---------------- HELPERS ----------------
 def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
-    url = server_url or get_current_server_url()
+    url = server_url or servers[0]["url"]
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream, */*"}
     try:
@@ -72,21 +59,6 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
-def check_server_health(server_url: str) -> bool:
-    try:
-        resp = call_mcp_server("health", server_url=server_url, timeout=6)
-        if isinstance(resp, dict) and ("result" in resp or "status" in resp):
-            return True
-    except Exception:
-        pass
-    try:
-        resp = call_mcp_server("tools/list", server_url=server_url, timeout=6)
-        if isinstance(resp, dict) and "result" in resp:
-            return True
-    except Exception:
-        pass
-    return False
-
 def list_mcp_tools(server_url: Optional[str] = None) -> list:
     resp = call_mcp_server("tools/list", server_url=server_url)
     if not isinstance(resp, dict):
@@ -100,26 +72,6 @@ def list_mcp_tools(server_url: Optional[str] = None) -> list:
 
 def call_tool(name: str, arguments: dict, server_url: Optional[str] = None) -> Dict[str, Any]:
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments or {}}, server_url=server_url)
-
-def humanize_age(created_at: str) -> str:
-    try:
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        delta = now - created
-        seconds = int(delta.total_seconds())
-        if seconds < 60:
-            return f"{seconds}s"
-        minutes = seconds // 60
-        if minutes < 60:
-            return f"{minutes}m"
-        hours = minutes // 60
-        if hours < 24:
-            return f"{hours}h{minutes % 60}m"
-        days = hours // 24
-        hours = hours % 24
-        return f"{days}d{hours}h"
-    except Exception:
-        return "-"
 
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not args:
@@ -144,19 +96,21 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
         pass
     return None
 
-def ask_gemini_for_tool_decision(query: str) -> Dict[str, Any]:
-    tools = list_mcp_tools()
-    tool_names = [t.get("name") for t in tools]
+# ---------------- GEMINI DECISIONS ----------------
+def ask_gemini_for_tool_and_server(query: str) -> Dict[str, Any]:
+    tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"])]
+    server_names = [s["name"] for s in servers]
     instruction = f"""
-You are an AI agent that maps a user's short query to an MCP tool call.
+You are an AI agent that maps a user's short query to an MCP tool call and selects the best MCP server.
 User query: "{query}"
+Available servers: {json.dumps(server_names)}
 Available tools: {json.dumps(tool_names)}
 Return STRICT JSON only:
-{{"tool": "<tool_name_or_null>", "args": {{ ... }} , "explanation": "short explanation"}}
-If unsure, set tool to null and args to null.
+{{"tool": "<tool_name_or_null>", "args": {{ ... }}, "server": "<server_name_or_null>", "explanation": "short explanation"}}
+If unsure, set tool and server to null.
 """
     if not GEMINI_AVAILABLE:
-        return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback."}
+        return {"tool": None, "args": None, "server": None, "explanation": "Gemini not configured; fallback."}
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         resp = model.generate_content(instruction)
@@ -167,11 +121,11 @@ If unsure, set tool to null and args to null.
         except Exception:
             parsed = _extract_json_from_text(text)
         if not isinstance(parsed, dict):
-            return {"tool": None, "args": None, "explanation": f"Gemini response couldn't be parsed: {text[:200]}"}
+            return {"tool": None, "args": None, "server": None, "explanation": f"Gemini response couldn't be parsed: {text[:200]}"}
         parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
     except Exception as e:
-        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+        return {"tool": None, "args": None, "server": None, "explanation": f"Gemini error: {str(e)}"}
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
     if not GEMINI_AVAILABLE:
@@ -193,20 +147,8 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
-    # ---------------- SIDEBAR ----------------
-    st.sidebar.subheader("🌐 MCP Servers")
-    for s in servers:
-        status_icon = "❌"
-        # Keep original server connection logic
-        if check_server_health(s["url"]):
-            status_icon = "✅"
-        st.sidebar.markdown(f"**{s['name']}** {status_icon}")
-
-    # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
-    if "create_flow_form" not in st.session_state:
-        st.session_state["create_flow_form"] = False
 
     # Render chat history
     for msg in st.session_state["messages"]:
@@ -214,70 +156,40 @@ def main():
         with st.chat_message(role):
             st.markdown(msg.get("content", ""))
 
-    # Create application flow
-    if st.session_state["create_flow_form"]:
-        st.markdown("### Create ArgoCD Application — Form")
-        with st.form("create_app_form"):
-            app_name = st.text_input("Application Name", value="")
-            project = st.text_input("Project", value="default")
-            repo_url = st.text_input("Repository URL", value="")
-            path = st.text_input("Path (in repo)", value="")
-            dest_ns = st.text_input("Destination Namespace", value="default")
-            submit_create = st.form_submit_button("Create Application")
-            cancel_create = st.form_submit_button("Cancel")
-        if cancel_create:
-            st.session_state["create_flow_form"] = False
-            st.session_state["messages"].append({"role": "assistant", "content": "Create application flow cancelled."})
-            st.experimental_rerun()
-        if submit_create:
-            args = {"name": app_name, "project": project, "repo_url": repo_url, "path": path, "dest_ns": dest_ns}
-            candidate = None
-            for t in list_mcp_tools():
-                n = t.get("name", "").lower()
-                if "create" in n and ("app" in n or "application" in n):
-                    candidate = t.get("name")
-                    break
-            st.session_state["create_flow_form"] = False
-            st.session_state["messages"].append({"role": "assistant", "content": f"Submitting Create Application: ```json\n{json.dumps(args, indent=2)}\n```"})
-            if candidate:
-                resp = call_tool(candidate, args)
-                pretty = ask_gemini_answer("Create ArgoCD Application", resp)
-                st.session_state["messages"].append({"role": "assistant", "content": pretty})
-            else:
-                st.session_state["messages"].append({"role": "assistant", "content": "No create-application tool found; showing JSON payload instead."})
-            st.experimental_rerun()
-
     # Chat input
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
     if user_prompt:
         st.session_state["messages"].append({"role": "user", "content": user_prompt})
         st.chat_message("user").markdown(user_prompt)
 
-        if user_prompt.strip().lower() == "create application" and not st.session_state["create_flow_form"]:
-            st.session_state["create_flow_form"] = True
-            prompt = "Opening Create ArgoCD Application form..."
-            st.session_state["messages"].append({"role": "assistant", "content": prompt})
-            st.chat_message("assistant").markdown(prompt)
-            st.experimental_rerun()
-
-        decision = ask_gemini_for_tool_decision(user_prompt)
+        # Ask Gemini for both tool and server
+        decision = ask_gemini_for_tool_and_server(user_prompt)
         explanation = f"💡 {decision.get('explanation', '')}" if decision.get("explanation") else "💡 Tool decision produced."
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
         st.chat_message("assistant").markdown(explanation)
 
-        if decision.get("tool"):
-            tool_name = decision["tool"]
+        # Determine server URL
+        server_name = decision.get("server")
+        server_url = None
+        if server_name:
+            for s in servers:
+                if s["name"] == server_name:
+                    server_url = s["url"]
+                    break
+        if not server_url:
+            server_url = servers[0]["url"]  # fallback
+
+        # Execute tool if selected
+        tool_name = decision.get("tool")
+        if tool_name:
             tool_args = decision.get("args") or {}
-            st.chat_message("assistant").markdown(f"🔧 Executing *{tool_name}* with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```")
-            resp = call_tool(tool_name, tool_args)
+            st.chat_message("assistant").markdown(f"🔧 Executing *{tool_name}* on server `{server_name}` with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```")
+            resp = call_tool(tool_name, tool_args, server_url=server_url)
             final_answer = ask_gemini_answer(user_prompt, resp)
             st.session_state["messages"].append({"role": "assistant", "content": final_answer})
             st.chat_message("assistant").markdown(final_answer)
         else:
-            if GEMINI_AVAILABLE:
-                answer = ask_gemini_answer(user_prompt, {"note": "No tool selected; performing chat fallback."})
-            else:
-                answer = "No tool selected and Gemini is not configured. Try a direct command like a tool name or type 'create application'."
+            answer = "No tool selected. Try a direct command or check MCP server tools."
             st.session_state["messages"].append({"role": "assistant", "content": answer})
             st.chat_message("assistant").markdown(answer)
 
