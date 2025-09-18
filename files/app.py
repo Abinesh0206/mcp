@@ -15,7 +15,7 @@ import google.generativeai as genai
 load_dotenv()
 
 # ✅ USE gemini-2.0-flash-lite → 1,000 free requests/day (NOT 1.5-flash)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyD_ZoULiDzQO_ws6GrNvclHyuGbAL1nkIc")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 GEMINI_AVAILABLE = False
@@ -54,6 +54,7 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
         res.raise_for_status()
         text = res.text.strip()
 
+        # handle SSE-like responses where lines start with `data:`
         if "data:" in text:
             for line in text.splitlines():
                 if line.startswith("data:"):
@@ -87,6 +88,7 @@ def call_tool(name: str, arguments: dict, server_url: Optional[str] = None) -> D
 
 
 user_prompt_global = ""
+
 
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not args:
@@ -158,7 +160,7 @@ def ask_gemini_for_tool_and_server(query: str, retries: int = 2) -> Dict[str, An
             "explanation": "⚠️ Gemini unavailable. Try: 'show me all pods', 'list namespaces', etc."
         }
 
-    tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"])]
+    tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"]) if isinstance(t, dict)]
     server_names = [s["name"] for s in servers]
 
     instruction = f"""
@@ -189,12 +191,15 @@ Do NOT answer the question. Only return JSON.
                 end = text.rfind("```")
                 text = text[start:end] if end > start else text
 
-            parsed = json.loads(text) if "{" in text else None
-            if not parsed:
-                import re
-                json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                if json_match:
-                    parsed = json.loads(json_match.group())
+            parsed = None
+            if "{" in text:
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    import re
+                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if json_match:
+                        parsed = json.loads(json_match.group())
 
             if isinstance(parsed, dict):
                 parsed["args"] = sanitize_args(parsed.get("args") or {})
@@ -311,6 +316,7 @@ RESOURCE_TYPES = [
     "pv",
     "pvc"
 ]
+
 
 def get_cluster_summary(server_url: str) -> dict:
     summary = {}
