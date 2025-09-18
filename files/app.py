@@ -121,13 +121,20 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not args:
         return {}
     fixed = dict(args)
+
+    # Normalize resourceType
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
+
+    # Default namespace for pods if not provided
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
+
+    # Handle "all" → all namespaces
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
+
     return fixed
 
 
@@ -210,7 +217,7 @@ Do NOT answer the user question here. Only map it.
 
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Convert raw MCP response into a direct, human-friendly answer."""
+    """Convert raw MCP response into bullet-point answer."""
     if not GEMINI_AVAILABLE:
         return json.dumps(raw_response, indent=2)
 
@@ -219,13 +226,38 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Answer ONLY the user’s exact question in clear human language. "
-            "Do not add extra details or context. Be concise but clear."
+            "Rewrite the response as clear bullet points (•). "
+            "Do NOT give paragraphs. Only concise point-wise answers."
         )
         resp = model.generate_content(prompt)
         return getattr(resp, "text", str(resp)).strip()
     except Exception as e:
         return f"Gemini error while post-processing: {str(e)}"
+
+
+# ================= CLUSTER SUMMARY =================
+RESOURCE_TYPES = [
+    "pods",
+    "services",
+    "deployments",
+    "jobs",
+    "cronjobs",
+    "configmaps",
+    "secrets",
+    "ingresses",
+    "namespaces",
+    "nodes",
+    "pv",
+    "pvc"
+]
+
+def get_cluster_summary(server_url: str) -> dict:
+    """Collects all resource types for full cluster summary."""
+    summary = {}
+    for r in RESOURCE_TYPES:
+        resp = call_tool("kubectl_get", {"resourceType": r, "allNamespaces": True}, server_url)
+        summary[r] = resp.get("result") if isinstance(resp, dict) else resp
+    return summary
 
 
 # ================= STREAMLIT APP =================
@@ -251,6 +283,19 @@ def main():
     st.chat_message("user").markdown(user_prompt)
 
     # Decision phase
+    if "all resources" in user_prompt.lower():
+        explanation = "💡 Fetching full cluster summary (all namespaces, all resource types)."
+        st.session_state["messages"].append({"role": "assistant", "content": explanation})
+        st.chat_message("assistant").markdown(explanation)
+
+        server_url = servers[0]["url"]
+        summary = get_cluster_summary(server_url)
+        final_answer = ask_gemini_answer(user_prompt, summary)
+
+        st.session_state["messages"].append({"role": "assistant", "content": final_answer})
+        st.chat_message("assistant").markdown(final_answer)
+        return
+
     decision = ask_gemini_for_tool_and_server(user_prompt)
     explanation = f"💡 {decision.get('explanation', '')}" if decision.get("explanation") else "💡 Tool decision produced."
     st.session_state["messages"].append({"role": "assistant", "content": explanation})
