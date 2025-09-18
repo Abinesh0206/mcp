@@ -13,7 +13,7 @@ import re
 # ================= CONFIG =================
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBl6Q80dA6qjnUOZ0-Yg6oNFqCYxamzTPM")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDMcUvj_79LwDrimRhkfq6BUFTWttXc1BQ")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 GEMINI_AVAILABLE = False
