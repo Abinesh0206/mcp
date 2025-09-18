@@ -1,3 +1,5 @@
+# app.py
+
 # ================= IMPORTS =================
 import os
 import json
@@ -13,7 +15,7 @@ import google.generativeai as genai
 # ================= CONFIG =================
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeUhwJf1-qRz2wy3y680JNXmpcG6LkfhQ")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 GEMINI_AVAILABLE = False
@@ -149,7 +151,8 @@ def ask_gemini_for_tool_and_server(query: str,
     server_names = [s["name"] for s in servers]
 
     instruction = f"""
-You are an AI agent that maps a user's query to an MCP tool call and selects the best MCP server.
+You are an AI router. Your task is to map a user query to ONE MCP tool and ONE MCP server.
+
 User query: "{query}"
 
 Available servers: {json.dumps(server_names)}
@@ -158,6 +161,7 @@ Available tools: {json.dumps(tool_names)}
 Return STRICT JSON only:
 {{"tool": "<tool_name_or_null>", "args": {{ ... }}, "server": "<server_name_or_null>", "explanation": "short explanation"}}
 If unsure, set tool and server to null.
+Do NOT answer the user question here. Only map it.
 """
 
     if not GEMINI_AVAILABLE:
@@ -206,7 +210,7 @@ If unsure, set tool and server to null.
 
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Use Gemini to give a direct human-readable answer (no extra explanation)."""
+    """Convert raw MCP response into a direct, human-friendly answer."""
     if not GEMINI_AVAILABLE:
         return json.dumps(raw_response, indent=2)
 
@@ -215,8 +219,8 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Answer ONLY the user's question in simple human-readable language. "
-            "Do not add extra explanation, analysis, or formatting beyond what was asked."
+            "Answer ONLY the user’s exact question in clear human language. "
+            "Do not add extra details or context. Be concise but clear."
         )
         resp = model.generate_content(prompt)
         return getattr(resp, "text", str(resp)).strip()
