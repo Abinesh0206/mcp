@@ -14,8 +14,8 @@ import google.generativeai as genai
 # ================= CONFIG =================
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAkqKd3Hc60Qf6N_3ZYj1eu_GtFzkMmMVQ")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")  # 1,000 free/day
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyD_ZoULiDzQO_ws6GrNvclHyuGbAL1nkIc")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")  # 1,000 free/day
 
 GEMINI_AVAILABLE = False
 if GEMINI_API_KEY:
