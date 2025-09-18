@@ -7,7 +7,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 import google.generativeai as genai
-from openai import OpenAI
+# from openai import OpenAI
 import re
 
 
