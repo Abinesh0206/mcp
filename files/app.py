@@ -7,27 +7,63 @@ import streamlit as st
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 import google.generativeai as genai
+from openai import OpenAI
 import re
 
 
 # ================= CONFIG =================
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDMcUvj_79LwDrimRhkfq6BUFTWttXc1BQ")
+# ✅ CHOOSE YOUR MODEL HERE — JUST UNCOMMENT ONE LINE
+
+MODEL_PROVIDER = "gemini"
+# MODEL_PROVIDER = "openai"
+# MODEL_PROVIDER = "ollama"
+
+# === GEMINI CONFIG ===
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_key_here")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
+# === OPENAI CONFIG ===
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your_openai_key_here")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# === OLLAMA CONFIG ===
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+
+# ================= MODEL INIT =================
 GEMINI_AVAILABLE = False
-if GEMINI_API_KEY:
+OPENAI_AVAILABLE = False
+OLLAMA_AVAILABLE = False
+
+if MODEL_PROVIDER == "gemini" and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         GEMINI_AVAILABLE = True
-    except Exception:
-        GEMINI_AVAILABLE = False
+    except Exception as e:
+        st.error(f"Gemini init failed: {e}")
+
+elif MODEL_PROVIDER == "openai" and OPENAI_API_KEY:
+    try:
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        OPENAI_AVAILABLE = True
+    except Exception as e:
+        st.error(f"OpenAI init failed: {e}")
+
+elif MODEL_PROVIDER == "ollama":
+    try:
+        test_resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        if test_resp.status_code == 200:
+            OLLAMA_AVAILABLE = True
+        else:
+            st.error(f"Ollama not reachable at {OLLAMA_BASE_URL}")
+    except Exception as e:
+        st.error(f"Ollama connection failed: {e}")
 
 
 # ================= SERVER MANAGEMENT =================
 def load_servers() -> list:
-    """Load MCP servers from servers.json or fallback to default."""
     try:
         with open("servers.json") as f:
             data = json.load(f)
@@ -52,7 +88,6 @@ def call_mcp_server(method: str,
                     params: Optional[Dict[str, Any]] = None,
                     server_url: Optional[str] = None,
                     timeout: int = 20) -> Dict[str, Any]:
-    """Generic MCP server JSON-RPC call."""
     url = server_url or servers[0]["url"]
     payload = {
         "jsonrpc": "2.0",
@@ -70,7 +105,6 @@ def call_mcp_server(method: str,
         res.raise_for_status()
         text = res.text.strip() if res.text else ""
 
-        # Handle SSE style response
         if "" in text:
             for line in text.splitlines():
                 line = line.strip()
@@ -81,7 +115,6 @@ def call_mcp_server(method: str,
                     except Exception:
                         return {"result": payload_text}
 
-        # Handle JSON response
         try:
             return res.json()
         except ValueError:
@@ -94,7 +127,6 @@ def call_mcp_server(method: str,
 
 
 def list_mcp_tools(server_url: Optional[str] = None) -> list:
-    """List available tools on MCP server."""
     resp = call_mcp_server("tools/list", server_url=server_url)
     if not isinstance(resp, dict):
         return []
@@ -109,7 +141,6 @@ def list_mcp_tools(server_url: Optional[str] = None) -> list:
 def call_tool(name: str,
               arguments: dict,
               server_url: Optional[str] = None) -> Dict[str, Any]:
-    """Call a tool on MCP server."""
     return call_mcp_server("tools/call", {
         "name": name,
         "arguments": arguments or {}
@@ -117,7 +148,6 @@ def call_tool(name: str,
 
 
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Fix common argument issues before calling tools."""
     if not args:
         return {}
     fixed = dict(args)
@@ -132,7 +162,6 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
-    """Extract JSON object from free text."""
     try:
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -145,7 +174,6 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
 
 # ================= VALIDATION HELPERS =================
 def is_valid_k8s_response(response: dict) -> bool:
-    """Check if response contains real, non-empty Kubernetes data."""
     if not response or "error" in response:
         return False
     result = response.get("result", {})
@@ -165,7 +193,6 @@ def is_valid_k8s_response(response: dict) -> bool:
 
 
 def clean_cluster_name(name: str) -> str:
-    """Clean and validate cluster name extracted from node."""
     if not name:
         return ""
     name = re.sub(r'^(ip-|node-|k8s-|kube-)', '', name, flags=re.IGNORECASE)
@@ -174,10 +201,8 @@ def clean_cluster_name(name: str) -> str:
     return name.strip()[:50]
 
 
-# ================= GEMINI FUNCTIONS =================
-def ask_gemini_for_tool_and_server(query: str,
-                                   retries: int = 2) -> Dict[str, Any]:
-    """Ask Gemini to select tool + server for query."""
+# ================= MULTI-MODEL LLM FUNCTIONS =================
+def ask_llm_for_tool_and_server(query: str, retries: int = 2) -> Dict[str, Any]:
     available_tools = []
     for s in servers:
         tools = list_mcp_tools(s["url"])
@@ -213,19 +238,41 @@ RULES:
 {{"tool": "<tool_name_or_null>", "args": {{ ... }}, "server": "<server_name_or_null>", "explanation": "short explanation"}}
 """
 
-    if not GEMINI_AVAILABLE:
-        return {
-            "tool": None,
-            "args": None,
-            "server": None,
-            "explanation": "Gemini not configured; using fallback."
-        }
-
     for attempt in range(retries):
         try:
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            resp = model.generate_content(instruction)
-            text = getattr(resp, "text", str(resp)).strip()
+            if MODEL_PROVIDER == "gemini" and GEMINI_AVAILABLE:
+                model = genai.GenerativeModel(GEMINI_MODEL)
+                resp = model.generate_content(instruction)
+                text = getattr(resp, "text", str(resp)).strip()
+
+            elif MODEL_PROVIDER == "openai" and OPENAI_AVAILABLE:
+                completion = openai_client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[{"role": "user", "content": instruction}],
+                    temperature=0.0,
+                    max_tokens=500
+                )
+                text = completion.choices[0].message.content.strip()
+
+            elif MODEL_PROVIDER == "ollama" and OLLAMA_AVAILABLE:
+                resp = requests.post(f"{OLLAMA_BASE_URL}/api/generate", json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": instruction,
+                    "stream": False,
+                    "options": {"temperature": 0.1}
+                }, timeout=30)
+                if resp.status_code == 200:
+                    text = resp.json().get("response", "").strip()
+                else:
+                    raise Exception(f"Ollama error: {resp.text}")
+
+            else:
+                return {
+                    "tool": None,
+                    "args": None,
+                    "server": None,
+                    "explanation": f"{MODEL_PROVIDER} not available or misconfigured."
+                }
 
             parsed = None
             try:
@@ -252,19 +299,18 @@ RULES:
                 "tool": None,
                 "args": None,
                 "server": None,
-                "explanation": f"Gemini error: {str(e)}"
+                "explanation": f"Model error: {str(e)}"
             }
 
     return {
         "tool": None,
         "args": None,
         "server": None,
-        "explanation": "Gemini failed after retries."
+        "explanation": "Model failed after retries."
     }
 
 
-def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None) -> str:
-    """Use Gemini to convert raw MCP response into human-friendly answer."""
+def ask_llm_answer(user_input: str, raw_response: dict, context: dict = None) -> str:
     if context is None:
         context = {}
 
@@ -273,9 +319,6 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
         cname = st.session_state["last_known_cluster_name"]
         if isinstance(cname, str) and cname.lower().strip() in BAD_NAMES:
             del st.session_state["last_known_cluster_name"]
-
-    if not GEMINI_AVAILABLE:
-        return generate_fallback_answer(user_input, raw_response, context)
 
     try:
         context_notes = ""
@@ -288,7 +331,6 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
             if isinstance(csize, int) and csize > 0:
                 context_notes += f"\nSize: {csize} nodes"
 
-        model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = (
             f"User asked: {user_input}\n"
             f"Context: {context_notes}\n\n"
@@ -300,8 +342,35 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
             "- NEVER show JSON or errors to user.\n"
             "- Be helpful and precise."
         )
-        resp = model.generate_content(prompt)
-        answer = getattr(resp, "text", str(resp)).strip()
+
+        if MODEL_PROVIDER == "gemini" and GEMINI_AVAILABLE:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            resp = model.generate_content(prompt)
+            answer = getattr(resp, "text", str(resp)).strip()
+
+        elif MODEL_PROVIDER == "openai" and OPENAI_AVAILABLE:
+            completion = openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=1000
+            )
+            answer = completion.choices[0].message.content.strip()
+
+        elif MODEL_PROVIDER == "ollama" and OLLAMA_AVAILABLE:
+            resp = requests.post(f"{OLLAMA_BASE_URL}/api/generate", json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3}
+            }, timeout=60)
+            if resp.status_code == 200:
+                answer = resp.json().get("response", "").strip()
+            else:
+                raise Exception("Ollama failed")
+
+        else:
+            return generate_fallback_answer(user_input, raw_response, context)
 
         extract_and_store_cluster_info(user_input, answer)
         return answer
@@ -311,7 +380,6 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
 
 
 def generate_fallback_answer(user_input: str, raw_response: dict, context: dict = None) -> str:
-    """Generate human-friendly answer without Gemini — with forced cluster name inference."""
     if context is None:
         context = {}
 
@@ -338,7 +406,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
 
     result = raw_response.get("result", {})
 
-    # >>> FORCE CLUSTER NAME EXTRACTION <<<
     if "cluster name" in user_input.lower():
         if isinstance(result, dict) and "items" in result and len(result["items"]) > 0:
             first_item = result["items"][0]
@@ -356,11 +423,8 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
                 return f"✅ Cluster name (inferred from namespace): **{cluster_name}**"
         return "I couldn't find a node or namespace to infer the cluster name from. Please check if any resources exist."
 
-    # Handle “show all cluster details”
     if context:
         summary = "📊 **Full Cluster Report**\n\n"
-
-        # Cluster Name — FORCE INFERENCE
         cluster_name = None
         if "nodes" in context and "items" in context["nodes"] and len(context["nodes"]["items"]) > 0:
             first_node = context["nodes"]["items"][0].get("metadata", {}).get("name", "")
@@ -376,7 +440,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
         else:
             summary += "🔹 **Cluster Name**: `unknown-cluster` (no resources to infer from)\n"
 
-        # Nodes
         if "nodes" in context:
             node_items = context["nodes"].get("items", [])
             summary += f"🔹 **Nodes**: {len(node_items)} total\n"
@@ -391,7 +454,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
             if len(node_items) > 3:
                 summary += f"   • ... and {len(node_items) - 3} more\n"
 
-        # Namespaces
         if "namespaces" in context:
             ns_items = context["namespaces"].get("items", [])
             summary += f"\n🔹 **Namespaces**: {len(ns_items)}\n"
@@ -401,7 +463,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
             if len(ns_items) > 5:
                 summary += f"   • ... and {len(ns_items) - 5} more\n"
 
-        # Pods
         if "pods" in context:
             pod_items = context["pods"].get("items", [])
             running = sum(1 for p in pod_items if p.get("status", {}).get("phase") == "Running")
@@ -411,7 +472,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
 
         return summary.strip()
 
-    # Generic fallback
     if isinstance(result, dict) and "items" in result:
         items = result["items"]
         if len(items) == 1:
@@ -426,7 +486,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
 
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
-    """Extract cluster name/size from Gemini answer and store in session — only if valid."""
     try:
         BAD_NAMES = {"the", "unknown", "cluster", "null", "none", "undefined", ""}
         if "cluster name" in user_input.lower():
@@ -462,6 +521,7 @@ def main():
     st.title("🤖 Masa Bot Assistant")
 
     debug_mode = st.sidebar.checkbox("🛠 Debug Mode (Show Raw Data)")
+    st.sidebar.markdown(f"**Model**: `{MODEL_PROVIDER}`")
 
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
@@ -480,7 +540,7 @@ def main():
     st.session_state["messages"].append({"role": "user", "content": user_prompt})
     st.chat_message("user").markdown(user_prompt)
 
-    decision = ask_gemini_for_tool_and_server(user_prompt)
+    decision = ask_llm_for_tool_and_server(user_prompt)
     explanation = f"💡 {decision.get('explanation', 'I’m figuring out how to help you...')}"
     st.session_state["messages"].append({"role": "assistant", "content": explanation})
     st.chat_message("assistant").markdown(explanation)
@@ -495,7 +555,6 @@ def main():
 
     tool_name = decision.get("tool")
 
-    # Handle “show all details”
     if any(phrase in user_prompt.lower() for phrase in [
         "show me all details", "full cluster", "complete overview", "everything about cluster"
     ]):
@@ -504,7 +563,6 @@ def main():
         cluster_context = {}
         errors = []
 
-        # Get Nodes
         with st.spinner("📡 Fetching nodes..."):
             nodes_resp = call_tool("kubectl_get", {"resourceType": "nodes", "format": "json"}, server_url=server_url)
             if is_valid_k8s_response(nodes_resp):
@@ -519,7 +577,6 @@ def main():
             else:
                 errors.append("Could not fetch nodes")
 
-        # Get Namespaces
         with st.spinner("📚 Fetching namespaces..."):
             ns_resp = call_tool("kubectl_get", {"resourceType": "namespaces", "format": "json"}, server_url=server_url)
             if is_valid_k8s_response(ns_resp):
@@ -527,7 +584,6 @@ def main():
             else:
                 errors.append("Could not fetch namespaces")
 
-        # Get Pods
         with st.spinner("📦 Fetching pods..."):
             pods_resp = call_tool("kubectl_get", {"resourceType": "pods", "allNamespaces": True, "format": "json"}, server_url=server_url)
             if is_valid_k8s_response(pods_resp):
@@ -535,7 +591,6 @@ def main():
             else:
                 errors.append("Could not fetch pods")
 
-        # Get Deployments
         with st.spinner("🚀 Fetching deployments..."):
             dep_resp = call_tool("kubectl_get", {"resourceType": "deployments", "allNamespaces": True, "format": "json"}, server_url=server_url)
             if is_valid_k8s_response(dep_resp):
@@ -544,7 +599,7 @@ def main():
                 errors.append("Could not fetch deployments")
 
         if cluster_context:
-            final_answer = ask_gemini_answer(user_prompt, {}, context=cluster_context)
+            final_answer = ask_llm_answer(user_prompt, {}, context=cluster_context)
         else:
             final_answer = (
                 "⚠️ I couldn't retrieve any data from your cluster.\n\n"
@@ -566,7 +621,6 @@ def main():
         st.chat_message("assistant").markdown(final_answer)
         return
 
-    # Execute tool
     if tool_name:
         tool_args = decision.get("args") or {}
         display_args = json.dumps(tool_args, indent=2, ensure_ascii=False)
@@ -576,7 +630,6 @@ def main():
 
         resp = call_tool(tool_name, tool_args, server_url=server_url)
 
-        # Force cluster name inference
         if "cluster name" in user_prompt.lower() and not is_valid_k8s_response(resp):
             st.chat_message("assistant").markdown("📌 Inferring cluster name from nodes...")
             node_resp = call_tool("kubectl_get", {"resourceType": "nodes", "format": "json"}, server_url=server_url)
@@ -591,7 +644,7 @@ def main():
                         st.chat_message("assistant").markdown(f"✅ Cluster name: **{cluster_hint}**")
 
         if is_valid_k8s_response(resp):
-            final_answer = ask_gemini_answer(user_prompt, resp)
+            final_answer = ask_llm_answer(user_prompt, resp)
         else:
             final_answer = generate_fallback_answer(user_prompt, resp)
 
