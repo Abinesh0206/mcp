@@ -15,7 +15,7 @@ import google.generativeai as genai
 load_dotenv()
 
 # ✅ USE gemini-2.0-flash-lite → 1,000 free requests/day (NOT 1.5-flash)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyD_ZoULiDzQO_ws6GrNvclHyuGbAL1nkIc")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 GEMINI_AVAILABLE = False
