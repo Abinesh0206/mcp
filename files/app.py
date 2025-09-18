@@ -126,14 +126,14 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
 
-    # Default namespace for pods if not provided
-    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
-        fixed["namespace"] = "default"
-
-    # Handle "all" → all namespaces
-    if fixed.get("namespace") == "all":
+    # ✅ Fix: if user says "all" or "all namespaces", always set allNamespaces=True
+    if fixed.get("namespace", "").lower() in ["all", "all-namespaces", "allnamespace", "everything"]:
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
+
+    # ✅ Fix: default namespace only if NOT allNamespaces
+    if fixed.get("resourceType") == "pods" and "namespace" not in fixed and not fixed.get("allNamespaces"):
+        fixed["namespace"] = "default"
 
     return fixed
 
@@ -282,7 +282,7 @@ def main():
     st.session_state["messages"].append({"role": "user", "content": user_prompt})
     st.chat_message("user").markdown(user_prompt)
 
-    # Decision phase
+    # Special case: full cluster summary
     if "all resources" in user_prompt.lower():
         explanation = "💡 Fetching full cluster summary (all namespaces, all resource types)."
         st.session_state["messages"].append({"role": "assistant", "content": explanation})
@@ -296,6 +296,7 @@ def main():
         st.chat_message("assistant").markdown(final_answer)
         return
 
+    # Ask Gemini for routing
     decision = ask_gemini_for_tool_and_server(user_prompt)
     explanation = f"💡 {decision.get('explanation', '')}" if decision.get("explanation") else "💡 Tool decision produced."
     st.session_state["messages"].append({"role": "assistant", "content": explanation})
