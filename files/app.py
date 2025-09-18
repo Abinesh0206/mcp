@@ -5,7 +5,6 @@ import time
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import google.generativeai as genai
 import re
@@ -14,7 +13,7 @@ import re
 # ================= CONFIG =================
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA-iOGmYUxW000Nk6ORFFopi3cJE7J8wA4")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 GEMINI_AVAILABLE = False
@@ -72,7 +71,7 @@ def call_mcp_server(method: str,
         text = res.text.strip() if res.text else ""
 
         # Handle SSE style response
-        if text.startswith("event:") or "data:" in text:
+        if "data:" in text:
             for line in text.splitlines():
                 line = line.strip()
                 if line.startswith("data:"):
@@ -90,6 +89,8 @@ def call_mcp_server(method: str,
 
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
 
 
 def list_mcp_tools(server_url: Optional[str] = None) -> list:
@@ -142,6 +143,41 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 
+# ================= VALIDATION HELPERS =================
+def is_valid_k8s_response(response: dict) -> bool:
+    """Check if response contains real, non-empty Kubernetes data."""
+    if not response or "error" in response:
+        return False
+    result = response.get("result", {})
+    if not result:
+        return False
+
+    # If it's a Kubernetes list object
+    if isinstance(result, dict) and "items" in result:
+        return len(result.get("items", [])) > 0
+
+    # If it's a non-empty string
+    if isinstance(result, str) and len(result.strip()) > 0 and not result.strip().lower() in ["null", "none", "{}", "[]"]:
+        return True
+
+    # If it's a populated dict
+    if isinstance(result, dict) and len(result) > 0:
+        return any(v not in [None, "", [], {}] for v in result.values())
+
+    return False
+
+
+def clean_cluster_name(name: str) -> str:
+    """Clean and validate cluster name extracted from node."""
+    if not name:
+        return ""
+    # Remove common prefixes/suffixes
+    name = re.sub(r'^(ip-|node-|k8s-|kube-)', '', name, flags=re.IGNORECASE)
+    name = name.split(".")[0]  # Remove domain part
+    name = re.sub(r'[^a-zA-Z0-9\-]', '', name)  # Keep only safe chars
+    return name.strip()[:50]  # Limit length
+
+
 # ================= GEMINI FUNCTIONS =================
 def ask_gemini_for_tool_and_server(query: str,
                                    retries: int = 2) -> Dict[str, Any]:
@@ -158,9 +194,13 @@ def ask_gemini_for_tool_and_server(query: str,
     # Inject context from session state if available
     context_notes = ""
     if "last_known_cluster_name" in st.session_state:
-        context_notes += f"\nUser previously interacted with cluster: {st.session_state['last_known_cluster_name']}"
+        cname = st.session_state['last_known_cluster_name']
+        if cname and cname.lower() not in ["the", "unknown", "cluster", "null", "none"]:
+            context_notes += f"\nUser previously interacted with cluster: {cname}"
     if "last_known_cluster_size" in st.session_state:
-        context_notes += f"\nLast known cluster size: {st.session_state['last_known_cluster_size']} nodes"
+        csize = st.session_state['last_known_cluster_size']
+        if isinstance(csize, int) and csize > 0:
+            context_notes += f"\nLast known cluster size: {csize} nodes"
 
     instruction = f"""
 You are an AI assistant that maps a user's natural language query to an available MCP tool call.
@@ -174,7 +214,7 @@ RULES:
 - NEVER invent tool names. Only use tools listed above.
 - If user asks for "cluster name", use "kubectl_get" on "nodes" and infer name from node metadata.
 - If user asks for "cluster size", use "kubectl_get" with "nodes".
-- If user says "show me all details in my cluster", you MUST return tool: "kubectl_get" with args: {{"resourceType": "nodes"}}, and the system will AUTOMATICALLY collect more data.
+- If user says "show me all details in my cluster", return tool: "kubectl_get" with args: {{"resourceType": "nodes"}}
 - Return STRICT JSON only:
 {{"tool": "<tool_name_or_null>", "args": {{ ... }}, "server": "<server_name_or_null>", "explanation": "short natural language explanation"}}
 If no suitable tool, set tool and server to null.
@@ -236,15 +276,26 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
     if context is None:
         context = {}
 
+    # Clear hallucinated memory
+    BAD_NAMES = {"the", "unknown", "cluster", "null", "none", "undefined", ""}
+    if "last_known_cluster_name" in st.session_state:
+        cname = st.session_state["last_known_cluster_name"]
+        if isinstance(cname, str) and cname.lower().strip() in BAD_NAMES:
+            del st.session_state["last_known_cluster_name"]
+
     if not GEMINI_AVAILABLE:
         return generate_fallback_answer(user_input, raw_response, context)
 
     try:
         context_notes = ""
         if "last_known_cluster_name" in st.session_state:
-            context_notes += f"\nPreviously known cluster: {st.session_state['last_known_cluster_name']}"
+            cname = st.session_state['last_known_cluster_name']
+            if cname and cname.lower() not in BAD_NAMES:
+                context_notes += f"\nCluster name: {cname}"
         if "last_known_cluster_size" in st.session_state:
-            context_notes += f"\nPreviously known size: {st.session_state['last_known_cluster_size']} nodes"
+            csize = st.session_state['last_known_cluster_size']
+            if isinstance(csize, int) and csize > 0:
+                context_notes += f"\nCluster size: {csize} nodes"
 
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = (
@@ -252,20 +303,19 @@ def ask_gemini_answer(user_input: str, raw_response: dict, context: dict = None)
             f"Context: {context_notes}\n\n"
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
-            "- Respond in clear, natural, conversational English.\n"
+            "- Respond in clear, natural, conversational English (or Tamil if user prefers).\n"
             "- If it's a list, format with bullet points.\n"
-            "- If it's status, explain health and issues clearly.\n"
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong.\n"
-            "- If cluster name or size was inferred, mention that explicitly.\n"
+            "- If cluster name/size was inferred, mention that explicitly.\n"
             "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
-            "- NEVER show JSON, code, or internal errors to user unless asked.\n"
+            "- NEVER show JSON, code, or internal errors to user.\n"
             "- Be helpful, friendly, and precise.\n"
-            "- If context contains additional data (like pods, namespaces), summarize ALL of it in a cohesive report."
+            "- If context contains additional data, summarize ALL of it in a cohesive report."
         )
         resp = model.generate_content(prompt)
         answer = getattr(resp, "text", str(resp)).strip()
 
-        # Extract and store cluster info for future context
+        # Extract and store cluster info — but only if valid
         extract_and_store_cluster_info(user_input, answer)
 
         return answer
@@ -281,41 +331,61 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
 
     if "error" in raw_response:
         error_msg = raw_response["error"]
-        return f"Sorry, I ran into a technical issue: {error_msg.split('MCP error')[-1].strip() if 'MCP error' in error_msg else error_msg}"
+        if "kubectl" in error_msg:
+            return (
+                "⚠️ I couldn't get data from your cluster. This usually means:\n"
+                "• The MCP server can't reach Kubernetes\n"
+                "• Permissions issue (RBAC)\n"
+                "• Cluster is down or unreachable\n\n"
+                "🛠 Please check your cluster connection or ask your admin."
+            )
+        return f"⚠️ Technical issue: {error_msg.split('MCP error')[-1].strip() if 'MCP error' in error_msg else error_msg}"
+
+    if not is_valid_k8s_response(raw_response):
+        if "cluster" in user_input.lower() and ("name" in user_input.lower() or "details" in user_input.lower()):
+            return (
+                "🔍 I searched your cluster but couldn't find any data. Possible reasons:\n"
+                "• No resources exist\n"
+                "• You don't have permission to view them\n"
+                "• Cluster connection is broken\n\n"
+                "💡 Tip: Ask your admin to verify MCP server permissions."
+            )
+        return "📭 No data found. The cluster returned empty results."
 
     result = raw_response.get("result", {})
 
     # Handle “show all cluster details” — summarize everything from context
     if context:
-        summary = "📊 Here’s a full overview of your cluster:\n\n"
+        summary = "📊 **Full Cluster Report**\n\n"
 
         # Cluster Name
         if "cluster_name" in context:
-            summary += f"🔹 **Cluster Name**: {context['cluster_name']}\n"
+            summary += f"🔹 **Cluster Name**: `{context['cluster_name']}` (inferred)\n"
 
         # Nodes
         if "nodes" in context:
             node_items = context["nodes"].get("items", [])
             summary += f"🔹 **Nodes**: {len(node_items)} total\n"
-            for node in node_items[:3]:  # show first 3
+            for node in node_items[:3]:
                 name = node.get("metadata", {}).get("name", "unknown")
                 status = "Unknown"
                 for cond in node.get("status", {}).get("conditions", []):
-                    if cond.get("type") == "Ready":
-                        status = "Ready" if cond.get("status") == "True" else "NotReady"
-                summary += f"   • {name} ({status})\n"
+                    if cond.get("type") == "Ready" and cond.get("status") == "True":
+                        status = "✅ Ready"
+                        break
+                summary += f"   • `{name}` ({status})\n"
             if len(node_items) > 3:
-                summary += f"   • ... and {len(node_items) - 3} more nodes\n"
+                summary += f"   • ... and {len(node_items) - 3} more\n"
 
         # Namespaces
         if "namespaces" in context:
             ns_items = context["namespaces"].get("items", [])
-            summary += f"\n🔹 **Namespaces**: {len(ns_items)} total\n"
+            summary += f"\n🔹 **Namespaces**: {len(ns_items)}\n"
             for ns in ns_items[:5]:
                 name = ns.get("metadata", {}).get("name", "unknown")
-                summary += f"   • {name}\n"
+                summary += f"   • `{name}`\n"
             if len(ns_items) > 5:
-                summary += f"   • ... and {len(ns_items) - 5} more namespaces\n"
+                summary += f"   • ... and {len(ns_items) - 5} more\n"
 
         # Pods
         if "pods" in context:
@@ -328,12 +398,12 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
         # Deployments
         if "deployments" in context:
             dep_items = context["deployments"].get("items", [])
-            summary += f"\n🔹 **Deployments**: {len(dep_items)} total\n"
+            summary += f"\n🔹 **Deployments**: {len(dep_items)}\n"
             for dep in dep_items[:3]:
                 name = dep.get("metadata", {}).get("name", "unknown")
-                replicas = dep.get("spec", {}).get("replicas", 0)
-                ready = dep.get("status", {}).get("readyReplicas", 0)
-                summary += f"   • {name} (Desired: {replicas}, Ready: {ready})\n"
+                spec_replicas = dep.get("spec", {}).get("replicas", 0)
+                ready_replicas = dep.get("status", {}).get("readyReplicas", 0)
+                summary += f"   • `{name}` (Desired: {spec_replicas}, Ready: {ready_replicas})\n"
 
         return summary.strip()
 
@@ -341,12 +411,15 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
     if isinstance(result, dict) and "items" in result:
         items = result["items"]
         count = len(items)
-        if "node" in str(result).lower() or "cluster size" in user_input.lower():
+        if "node" in str(result).lower() or any(kw in user_input.lower() for kw in ["cluster size", "how many nodes"]):
             if count == 1:
                 node_name = items[0].get("metadata", {}).get("name", "unknown")
-                return f"This is a single-node cluster. The node is named: {node_name}"
+                cleaned_name = clean_cluster_name(node_name)
+                if cleaned_name:
+                    st.session_state["last_known_cluster_name"] = cleaned_name
+                return f"SingleNode Cluster 🟢\n• Node: `{node_name}`\n• Inferred cluster name: `{cleaned_name}`"
             else:
-                return f"The cluster has {count} nodes."
+                return f"Cluster Size: **{count} nodes**"
 
     # Try to infer cluster name from node name
     if isinstance(result, dict) and "items" in result and len(result["items"]) > 0:
@@ -354,37 +427,46 @@ def generate_fallback_answer(user_input: str, raw_response: dict, context: dict 
         if "metadata" in first_item:
             name = first_item["metadata"].get("name", "")
             if name:
-                cluster_name = name.split(".")[0] if "." in name else name
-                if "cluster" in user_input.lower() and "name" in user_input.lower():
-                    return f"I inferred the cluster name from the node name: **{cluster_name}**"
+                cluster_name = clean_cluster_name(name)
+                if cluster_name:
+                    st.session_state["last_known_cluster_name"] = cluster_name
+                    if "cluster" in user_input.lower() and "name" in user_input.lower():
+                        return f"✅ I inferred the cluster name: **{cluster_name}** (from node `{name}`)"
 
     # Generic fallback
-    return "Here's what I found:\n" + json.dumps(result, indent=2)
+    return "Here's what I found:\n" + json.dumps(result, indent=2)[:1000] + ("..." if len(str(result)) > 1000 else "")
 
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
-    """Extract cluster name/size from Gemini answer and store in session."""
+    """Extract cluster name/size from Gemini answer and store in session — only if valid."""
     try:
+        BAD_NAMES = {"the", "unknown", "cluster", "null", "none", "undefined", ""}
+        
         # Extract cluster name
         if "cluster name" in user_input.lower() or "show" in user_input.lower():
             patterns = [
-                r"cluster[^\w]*(\w+)",
-                r"name[^\w]*[:\-]?[^\w]*(\w+)",
-                r"\*\*(\w+)\*\*",
-                r"cluster\s*[:\-]?\s*(\w+)",
+                r"cluster[^\w]*(\w[\w\-]*)",
+                r"name[^\w]*[:\-]?[^\w]*(\w[\w\-]*)",
+                r"\*\*(\w[\w\-]*)\*\*",
+                r"cluster\s*[:\-]?\s*(\w[\w\-]*)",
+                r"inferred.*?[:\-]?\s*(\w[\w\-]*)"
             ]
             for pattern in patterns:
                 match = re.search(pattern, answer, re.IGNORECASE)
                 if match:
                     cluster_name = match.group(1).strip()
-                    st.session_state["last_known_cluster_name"] = cluster_name
-                    break
+                    if cluster_name.lower() not in BAD_NAMES and len(cluster_name) >= 3:
+                        st.session_state["last_known_cluster_name"] = cluster_name
+                        break
 
         # Extract cluster size
         if any(kw in user_input.lower() for kw in ["cluster size", "how many nodes", "show"]):
-            numbers = re.findall(r'\b\d+\b', answer)
-            if numbers:
-                st.session_state["last_known_cluster_size"] = int(numbers[0])
+            numbers = re.findall(r'\b(\d+)\b', answer)
+            for num_str in numbers:
+                num = int(num_str)
+                if 1 <= num <= 10000:  # reasonable range
+                    st.session_state["last_known_cluster_size"] = num
+                    break
     except Exception:
         pass  # silent fail
 
@@ -394,6 +476,9 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
+    # Debug toggle
+    debug_mode = st.sidebar.checkbox("🛠 Debug Mode (Show Raw Data)")
+
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
@@ -401,6 +486,9 @@ def main():
     for msg in st.session_state["messages"]:
         with st.chat_message(msg.get("role", "assistant")):
             st.markdown(msg.get("content", ""))
+            if debug_mode and "raw" in msg:
+                with st.expander("🔍 Debug: Raw Response"):
+                    st.json(msg["raw"])
 
     # Chat input
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
@@ -429,43 +517,75 @@ def main():
     tool_name = decision.get("tool")
 
     # Special handling for “show all cluster details”
-    if "show" in user_prompt.lower() and ("cluster" in user_prompt.lower() or "all" in user_prompt.lower() or "details" in user_prompt.lower()):
-        st.chat_message("assistant").markdown("🔍 I’m gathering a full cluster overview for you. This may take a moment...")
+    if any(phrase in user_prompt.lower() for phrase in [
+        "show me all details", "full cluster", "complete overview", "everything about cluster"
+    ]):
+        st.chat_message("assistant").markdown("🔍 Gathering full cluster overview...")
 
-        # Collect multiple resources
         cluster_context = {}
+        errors = []
 
         # 1. Get Nodes
-        nodes_resp = call_tool("kubectl_get", {"resourceType": "nodes", "format": "json"}, server_url=server_url)
-        if not nodes_resp.get("error"):
-            cluster_context["nodes"] = nodes_resp.get("result", {})
-            # Infer & store cluster name
-            if isinstance(cluster_context["nodes"], dict) and "items" in cluster_context["nodes"] and len(cluster_context["nodes"]["items"]) > 0:
-                first_node = cluster_context["nodes"]["items"][0].get("metadata", {}).get("name", "unknown-cluster")
-                cluster_name = first_node.split(".")[0] if "." in first_node else first_node
-                cluster_context["cluster_name"] = cluster_name
-                st.session_state["last_known_cluster_name"] = cluster_name
-                st.session_state["last_known_cluster_size"] = len(cluster_context["nodes"].get("items", []))
+        with st.spinner("📡 Fetching nodes..."):
+            nodes_resp = call_tool("kubectl_get", {"resourceType": "nodes", "format": "json"}, server_url=server_url)
+            if is_valid_k8s_response(nodes_resp):
+                cluster_context["nodes"] = nodes_resp.get("result", {})
+                # Infer & store cluster name
+                if isinstance(cluster_context["nodes"], dict) and "items" in cluster_context["nodes"] and len(cluster_context["nodes"]["items"]) > 0:
+                    first_node = cluster_context["nodes"]["items"][0].get("metadata", {}).get("name", "unknown-cluster")
+                    cluster_name = clean_cluster_name(first_node)
+                    if cluster_name:
+                        cluster_context["cluster_name"] = cluster_name
+                        st.session_state["last_known_cluster_name"] = cluster_name
+                    st.session_state["last_known_cluster_size"] = len(cluster_context["nodes"].get("items", []))
+            else:
+                errors.append("Could not fetch nodes")
 
         # 2. Get Namespaces
-        ns_resp = call_tool("kubectl_get", {"resourceType": "namespaces", "format": "json"}, server_url=server_url)
-        if not ns_resp.get("error"):
-            cluster_context["namespaces"] = ns_resp.get("result", {})
+        with st.spinner("📚 Fetching namespaces..."):
+            ns_resp = call_tool("kubectl_get", {"resourceType": "namespaces", "format": "json"}, server_url=server_url)
+            if is_valid_k8s_response(ns_resp):
+                cluster_context["namespaces"] = ns_resp.get("result", {})
+            else:
+                errors.append("Could not fetch namespaces")
 
         # 3. Get Pods (all namespaces)
-        pods_resp = call_tool("kubectl_get", {"resourceType": "pods", "allNamespaces": True, "format": "json"}, server_url=server_url)
-        if not pods_resp.get("error"):
-            cluster_context["pods"] = pods_resp.get("result", {})
+        with st.spinner("📦 Fetching pods..."):
+            pods_resp = call_tool("kubectl_get", {"resourceType": "pods", "allNamespaces": True, "format": "json"}, server_url=server_url)
+            if is_valid_k8s_response(pods_resp):
+                cluster_context["pods"] = pods_resp.get("result", {})
+            else:
+                errors.append("Could not fetch pods")
 
         # 4. Get Deployments
-        dep_resp = call_tool("kubectl_get", {"resourceType": "deployments", "allNamespaces": True, "format": "json"}, server_url=server_url)
-        if not dep_resp.get("error"):
-            cluster_context["deployments"] = dep_resp.get("result", {})
+        with st.spinner("🚀 Fetching deployments..."):
+            dep_resp = call_tool("kubectl_get", {"resourceType": "deployments", "allNamespaces": True, "format": "json"}, server_url=server_url)
+            if is_valid_k8s_response(dep_resp):
+                cluster_context["deployments"] = dep_resp.get("result", {})
+            else:
+                errors.append("Could not fetch deployments")
 
-        # Generate natural language summary
-        final_answer = ask_gemini_answer(user_prompt, {}, context=cluster_context)
+        # Generate summary
+        if cluster_context:
+            final_answer = ask_gemini_answer(user_prompt, {}, context=cluster_context)
+        else:
+            final_answer = (
+                "⚠️ I couldn't retrieve any data from your cluster.\n\n"
+                "Possible reasons:\n"
+                "• MCP server can't connect to Kubernetes\n"
+                "• Insufficient permissions (RBAC)\n"
+                "• Cluster is empty or down\n\n"
+                "🛠 Please check your setup or contact your administrator."
+            )
 
-        st.session_state["messages"].append({"role": "assistant", "content": final_answer})
+        if errors and debug_mode:
+            final_answer += f"\n\n---\n🔍 *Debug: {', '.join(errors)}*"
+
+        msg_obj = {"role": "assistant", "content": final_answer}
+        if debug_mode:
+            msg_obj["raw"] = cluster_context
+
+        st.session_state["messages"].append(msg_obj)
         st.chat_message("assistant").markdown(final_answer)
         return
 
@@ -474,49 +594,46 @@ def main():
         tool_args = decision.get("args") or {}
         display_args = json.dumps(tool_args, indent=2, ensure_ascii=False)
         st.chat_message("assistant").markdown(
-            f"🔧 I'll use *{tool_name}* to help you. Here's what I'm asking the system:\n```json\n{display_args}\n```"
+            f"🔧 Executing *{tool_name}*...\n```json\n{display_args}\n```"
         )
 
         resp = call_tool(tool_name, tool_args, server_url=server_url)
 
         # Smart fallback for cluster name inference
-        if "cluster name" in user_prompt.lower() and (resp.get("error") or not resp):
-            st.chat_message("assistant").markdown("📌 Let me try to infer the cluster name from available nodes...")
+        if "cluster name" in user_prompt.lower() and not is_valid_k8s_response(resp):
+            st.chat_message("assistant").markdown("📌 Inferring cluster name from nodes...")
             node_resp = call_tool("kubectl_get", {"resourceType": "nodes", "format": "json"}, server_url=server_url)
-            if node_resp and not node_resp.get("error"):
+            if is_valid_k8s_response(node_resp):
                 items = node_resp.get("result", {}).get("items", [])
                 if items:
                     first_node = items[0].get("metadata", {}).get("name", "unknown-cluster")
-                    cluster_hint = first_node.split(".")[0] if "." in first_node else first_node
-                    st.session_state["last_known_cluster_name"] = cluster_hint
-                    resp = {"result": {"inferred_cluster_name": cluster_hint}}
-                    st.chat_message("assistant").markdown(f"✅ I inferred the cluster name: **{cluster_hint}**")
+                    cluster_hint = clean_cluster_name(first_node)
+                    if cluster_hint:
+                        st.session_state["last_known_cluster_name"] = cluster_hint
+                        resp = {"result": f"Inferred cluster name: {cluster_hint} (from node {first_node})"}
+                        st.chat_message("assistant").markdown(f"✅ Cluster name: **{cluster_hint}**")
 
-        # Smart handling for cluster size
-        if "cluster size" in user_prompt.lower() and tool_name == "kubectl_get" and tool_args.get("resourceType") == "nodes":
-            if not resp.get("error") and isinstance(resp.get("result"), dict):
-                items = resp["result"].get("items", [])
-                node_count = len(items)
-                st.session_state["last_known_cluster_size"] = node_count
-                if node_count == 1:
-                    node_name = items[0].get("metadata", {}).get("name", "unknown")
-                    resp["result"]["_note"] = f"Single-node cluster. Node: {node_name}"
+        # Generate final answer
+        if is_valid_k8s_response(resp):
+            final_answer = ask_gemini_answer(user_prompt, resp)
+        else:
+            final_answer = generate_fallback_answer(user_prompt, resp)
 
-        # Generate final natural language answer
-        final_answer = ask_gemini_answer(user_prompt, resp)
+        msg_obj = {"role": "assistant", "content": final_answer}
+        if debug_mode:
+            msg_obj["raw"] = resp
 
-        st.session_state["messages"].append({"role": "assistant", "content": final_answer})
+        st.session_state["messages"].append(msg_obj)
         st.chat_message("assistant").markdown(final_answer)
 
     else:
-        # No tool selected — still try to give helpful answer
         helpful_response = (
-            "I couldn’t find a direct way to answer that, but here are some things you can ask:\n"
-            "- “Show me all details in my cluster” → I’ll give you a full report\n"
-            "- “What nodes are running?”\n"
-            "- “List all pods”\n"
-            "- “What’s the cluster name or size?”\n"
-            "\nTry rephrasing or ask for a cluster summary!"
+            "🤔 I couldn't find the right tool for that. Try asking:\n\n"
+            "• “Show me all details in my cluster” → Full report\n"
+            "• “How many nodes?” → Node count\n"
+            "• “List pods in jenkins namespace” → Specific query\n"
+            "• “What’s my cluster name?” → Name inference\n\n"
+            "💡 Tip: Be specific! I work best with clear questions."
         )
         st.session_state["messages"].append({"role": "assistant", "content": helpful_response})
         st.chat_message("assistant").markdown(helpful_response)
