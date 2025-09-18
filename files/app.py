@@ -1,4 +1,4 @@
-# app.py — IMPROVED VERSION (Client-side logic enhanced)
+# app.py — FINAL FIXED VERSION (Clean Output, No Quota Abuse, HTML Formatting)
 
 # ================= IMPORTS =================
 import os
@@ -7,7 +7,6 @@ import time
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import google.generativeai as genai
 
@@ -16,14 +15,22 @@ import google.generativeai as genai
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyAkqKd3Hc60Qf6N_3ZYj1eu_GtFzkMmMVQ")
+# ✅ Use gemini-2.0-flash-lite → 1,000 free requests/day
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
 GEMINI_AVAILABLE = False
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        GEMINI_AVAILABLE = True
-    except Exception:
+        # Validate model exists
+        model_list = [m.name for m in genai.list_models()]
+        if f"models/{GEMINI_MODEL}" not in model_list:
+            st.warning(f"Model {GEMINI_MODEL} not available. Falling back to client-side formatting only.")
+            GEMINI_AVAILABLE = False
+        else:
+            GEMINI_AVAILABLE = True
+    except Exception as e:
+        st.error(f"Gemini config error: {e}")
         GEMINI_AVAILABLE = False
 
 
@@ -116,6 +123,10 @@ def call_tool(name: str,
     }, server_url=server_url)
 
 
+# 🌍 GLOBAL VARIABLE TO HOLD USER PROMPT
+user_prompt_global = ""
+
+
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Fix common argument issues before calling tools."""
     if not args:
@@ -126,9 +137,10 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
 
-    # ✅ IMPROVED: If user says "all", "all pods", "everything", "show me all", etc. → force allNamespaces=True
+    # ✅ Auto-set allNamespaces if user says "all", "everything", etc.
     user_keywords_for_all = ["all", "everything", "show me all", "entire cluster", "across all", "all namespaces"]
     namespace_val = str(fixed.get("namespace", "")).lower()
+
     if any(kw in user_prompt_global.lower() for kw in user_keywords_for_all) or \
        namespace_val in ["all", "all-namespaces", "allnamespace", "everything", "*"]:
         fixed["allNamespaces"] = True
@@ -139,10 +151,6 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         fixed["namespace"] = "default"
 
     return fixed
-
-
-# 🌍 GLOBAL VARIABLE TO HOLD USER PROMPT (for sanitize_args logic above)
-user_prompt_global = ""
 
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
@@ -183,7 +191,7 @@ Do NOT answer the user question here. Only map it.
             "tool": None,
             "args": None,
             "server": None,
-            "explanation": "Gemini not configured; fallback."
+            "explanation": "Gemini not configured; using fallback routing."
         }
 
     for attempt in range(retries):
@@ -224,61 +232,65 @@ Do NOT answer the user question here. Only map it.
 
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Convert raw MCP response into clean bullet points."""
-    if not GEMINI_AVAILABLE:
-        # 🚫 FALLBACK: Format as bullet points manually if Gemini fails
-        try:
-            items = []
-            if isinstance(raw_response, dict) and "result" in raw_response:
-                result = raw_response["result"]
-                if isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, dict):
-                            name = item.get("name", "Unnamed")
-                            namespace = item.get("namespace", "default")
-                            status = item.get("status", "Unknown")
-                            items.append(f"• {name} ({namespace}, {status})")
-                        else:
-                            items.append(f"• {item}")
-                elif isinstance(result, str):
-                    # Try to split lines or comma-separated
-                    lines = result.splitlines()
-                    for line in lines:
-                        if line.strip():
-                            items.append(f"• {line.strip()}")
-                else:
-                    items.append(f"• {str(result)}")
-            else:
-                items.append(f"• {str(raw_response)}")
+    """Convert raw MCP response into clean bullet points using HTML for perfect formatting."""
 
-            return "\n".join(items) if items else "No data returned."
-        except Exception as e:
-            return f"⚠️ Fallback formatting failed: {str(e)}"
+    # ✅ STEP 1: Always try client-side formatting FIRST (no quota used)
+    try:
+        items = []
+        result = raw_response.get("result", raw_response) if isinstance(raw_response, dict) else raw_response
+
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict):
+                    name = item.get("name", "Unnamed")
+                    namespace = item.get("namespace", "default")
+                    status = item.get("status", "Unknown")
+                    items.append(f"{name} ({namespace}, {status})")
+                else:
+                    items.append(str(item))
+        elif isinstance(result, str):
+            lines = [line.strip() for line in result.splitlines() if line.strip()]
+            items = lines
+        else:
+            items.append(str(result))
+
+        if items:
+            # ✅ USE HTML <ul><li> TO FORCE ONE ITEM PER LINE
+            html_list = "<ul style='margin: 0; padding-left: 1.5rem;'>\n" + \
+                       "\n".join([f"<li style='margin-bottom: 0.2rem;'>• {item}</li>" for item in items]) + \
+                       "\n</ul>"
+            return html_list
+    except Exception as e:
+        st.warning(f"Fallback formatting failed: {e}")
+
+    # ✅ STEP 2: Use Gemini only if needed (e.g., summarization, complex queries)
+    if not GEMINI_AVAILABLE:
+        return f"<pre>{json.dumps(raw_response, indent=2)}</pre>"
 
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Rewrite the response as clear, concise bullet points (•). "
+            "Rewrite the response as clear, concise bullet points. "
             "DO NOT use paragraphs. DO NOT add explanations. "
-            "Format each item as: • <name> (<namespace>, <status>) if applicable. "
-            "If it's a list of strings, just prefix each with •. "
+            "Format each item as: • name (namespace, status). "
             "Keep it clean and machine-readable."
         )
         resp = model.generate_content(prompt)
         answer = getattr(resp, "text", str(resp)).strip()
 
-        # ✅ EXTRA SAFETY: If Gemini returns paragraph, force bullet it
-        if "\n•" not in answer and not answer.startswith("•"):
-            lines = [line.strip() for line in answer.splitlines() if line.strip()]
-            bulleted = "\n".join(f"• {line}" for line in lines)
-            return bulleted if bulleted else answer
-
-        return answer
+        # ✅ Convert Gemini output to HTML list
+        lines = [line.strip() for line in answer.splitlines() if line.strip()]
+        lines = [line[2:] if line.startswith("• ") else line for line in lines]  # remove leading • if any
+        html_list = "<ul style='margin: 0; padding-left: 1.5rem;'>\n" + \
+                   "\n".join([f"<li style='margin-bottom: 0.2rem;'>• {line}</li>" for line in lines]) + \
+                   "\n</ul>"
+        return html_list
 
     except Exception as e:
-        return f"Gemini error while post-processing: {str(e)}"
+        # ❗ Gemini failed? Return fallback even if rough
+        return f"<p>⚠️ Gemini error: {str(e)}</p>" + (html_list if 'html_list' in locals() else "")
 
 
 # ================= CLUSTER SUMMARY =================
@@ -317,14 +329,17 @@ def main():
     # Render chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg.get("role", "assistant")):
-            st.markdown(msg.get("content", ""))
+            if isinstance(msg.get("content"), str) and msg.get("content").startswith("<"):
+                st.markdown(msg["content"], unsafe_allow_html=True)
+            else:
+                st.markdown(msg.get("content", ""))
 
     # Chat input
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
     if not user_prompt:
         return
 
-    # 🌍 SET GLOBAL USER PROMPT (used in sanitize_args)
+    # 🌍 SET GLOBAL USER PROMPT
     global user_prompt_global
     user_prompt_global = user_prompt
 
@@ -343,7 +358,8 @@ def main():
         final_answer = ask_gemini_answer(user_prompt, summary)
 
         st.session_state["messages"].append({"role": "assistant", "content": final_answer})
-        st.chat_message("assistant").markdown(final_answer)
+        with st.chat_message("assistant"):
+            st.markdown(final_answer, unsafe_allow_html=True)
         return
 
     # Ask Gemini for routing
@@ -359,8 +375,9 @@ def main():
     # Execute tool
     if tool_name:
         tool_args = decision.get("args") or {}
+        display_args = json.dumps(tool_args, indent=2)
         st.chat_message("assistant").markdown(
-            f"🔧 Executing *{tool_name}* on server {decision.get('server')} with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```"
+            f"🔧 Executing *{tool_name}* on server {decision.get('server')} with arguments:\n```json\n{display_args}\n```"
         )
 
         resp = call_tool(tool_name, tool_args, server_url=server_url)
@@ -371,7 +388,8 @@ def main():
             final_answer = ask_gemini_answer(user_prompt, resp)
 
         st.session_state["messages"].append({"role": "assistant", "content": final_answer})
-        st.chat_message("assistant").markdown(final_answer)
+        with st.chat_message("assistant"):
+            st.markdown(final_answer, unsafe_allow_html=True)
     else:
         answer = "⚠️ No tool selected. Try again or check available MCP tools."
         st.session_state["messages"].append({"role": "assistant", "content": answer})
