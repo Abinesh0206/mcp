@@ -1,5 +1,3 @@
-# app.py
-
 # ================= IMPORTS =================
 import os
 import json
@@ -208,7 +206,7 @@ If unsure, set tool and server to null.
 
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Use Gemini to convert raw MCP response into human-friendly answer."""
+    """Use Gemini to give a direct human-readable answer (no extra explanation)."""
     if not GEMINI_AVAILABLE:
         return json.dumps(raw_response, indent=2)
 
@@ -217,9 +215,8 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Convert this into a detailed, human-friendly explanation. "
-            "If it's a list, format with bullet points. "
-            "If it's status, explain health and issues clearly."
+            "Answer ONLY the user's question in simple human-readable language. "
+            "Do not add extra explanation, analysis, or formatting beyond what was asked."
         )
         resp = model.generate_content(prompt)
         return getattr(resp, "text", str(resp)).strip()
