@@ -1,4 +1,4 @@
-# app.py
+# app.py — IMPROVED VERSION (Client-side logic enhanced)
 
 # ================= IMPORTS =================
 import os
@@ -126,16 +126,23 @@ def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
 
-    # ✅ Fix: if user says "all" or "all namespaces", always set allNamespaces=True
-    if fixed.get("namespace", "").lower() in ["all", "all-namespaces", "allnamespace", "everything"]:
+    # ✅ IMPROVED: If user says "all", "all pods", "everything", "show me all", etc. → force allNamespaces=True
+    user_keywords_for_all = ["all", "everything", "show me all", "entire cluster", "across all", "all namespaces"]
+    namespace_val = str(fixed.get("namespace", "")).lower()
+    if any(kw in user_prompt_global.lower() for kw in user_keywords_for_all) or \
+       namespace_val in ["all", "all-namespaces", "allnamespace", "everything", "*"]:
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
 
-    # ✅ Fix: default namespace only if NOT allNamespaces
+    # ✅ Default to "default" namespace ONLY if allNamespaces is NOT set
     if fixed.get("resourceType") == "pods" and "namespace" not in fixed and not fixed.get("allNamespaces"):
         fixed["namespace"] = "default"
 
     return fixed
+
+
+# 🌍 GLOBAL VARIABLE TO HOLD USER PROMPT (for sanitize_args logic above)
+user_prompt_global = ""
 
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
@@ -217,20 +224,59 @@ Do NOT answer the user question here. Only map it.
 
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Convert raw MCP response into bullet-point answer."""
+    """Convert raw MCP response into clean bullet points."""
     if not GEMINI_AVAILABLE:
-        return json.dumps(raw_response, indent=2)
+        # 🚫 FALLBACK: Format as bullet points manually if Gemini fails
+        try:
+            items = []
+            if isinstance(raw_response, dict) and "result" in raw_response:
+                result = raw_response["result"]
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict):
+                            name = item.get("name", "Unnamed")
+                            namespace = item.get("namespace", "default")
+                            status = item.get("status", "Unknown")
+                            items.append(f"• {name} ({namespace}, {status})")
+                        else:
+                            items.append(f"• {item}")
+                elif isinstance(result, str):
+                    # Try to split lines or comma-separated
+                    lines = result.splitlines()
+                    for line in lines:
+                        if line.strip():
+                            items.append(f"• {line.strip()}")
+                else:
+                    items.append(f"• {str(result)}")
+            else:
+                items.append(f"• {str(raw_response)}")
+
+            return "\n".join(items) if items else "No data returned."
+        except Exception as e:
+            return f"⚠️ Fallback formatting failed: {str(e)}"
 
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = (
             f"User asked: {user_input}\n\n"
             f"Raw MCP response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "Rewrite the response as clear bullet points (•). "
-            "Do NOT give paragraphs. Only concise point-wise answers."
+            "Rewrite the response as clear, concise bullet points (•). "
+            "DO NOT use paragraphs. DO NOT add explanations. "
+            "Format each item as: • <name> (<namespace>, <status>) if applicable. "
+            "If it's a list of strings, just prefix each with •. "
+            "Keep it clean and machine-readable."
         )
         resp = model.generate_content(prompt)
-        return getattr(resp, "text", str(resp)).strip()
+        answer = getattr(resp, "text", str(resp)).strip()
+
+        # ✅ EXTRA SAFETY: If Gemini returns paragraph, force bullet it
+        if "\n•" not in answer and not answer.startswith("•"):
+            lines = [line.strip() for line in answer.splitlines() if line.strip()]
+            bulleted = "\n".join(f"• {line}" for line in lines)
+            return bulleted if bulleted else answer
+
+        return answer
+
     except Exception as e:
         return f"Gemini error while post-processing: {str(e)}"
 
@@ -277,6 +323,10 @@ def main():
     user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
     if not user_prompt:
         return
+
+    # 🌍 SET GLOBAL USER PROMPT (used in sanitize_args)
+    global user_prompt_global
+    user_prompt_global = user_prompt
 
     # Store user message
     st.session_state["messages"].append({"role": "user", "content": user_prompt})
