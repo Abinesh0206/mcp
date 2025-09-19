@@ -1,4 +1,4 @@
-# app.py — FINAL WORKING VERSION — GEMINI + FALLBACK + NATURAL OUTPUT
+# app.py — SMART ROUTING MASA BOT
 
 # ================= IMPORTS =================
 import os
@@ -14,7 +14,6 @@ import google.generativeai as genai
 # ================= CONFIG =================
 load_dotenv()
 
-# ✅ USE gemini-2.0-flash-lite → 1,000 free requests/day (NOT 1.5-flash)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyD_ZoULiDzQO_ws6GrNvclHyuGbAL1nkIc")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
@@ -23,9 +22,7 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model_list = [m.name for m in genai.list_models()]
-        if f"models/{GEMINI_MODEL}" not in model_list:
-            st.warning(f"⚠ Model {GEMINI_MODEL} not available. Using fallback routing.")
-        else:
+        if f"models/{GEMINI_MODEL}" in model_list:
             GEMINI_AVAILABLE = True
     except Exception as e:
         st.error(f"❌ Gemini setup error: {e}")
@@ -33,29 +30,36 @@ if GEMINI_API_KEY:
 
 # ================= SERVER MANAGEMENT =================
 def load_servers() -> list:
+    """Load MCP servers from servers.json or fallback to defaults."""
     try:
         with open("servers.json") as f:
             data = json.load(f)
             return data.get("servers", []) or []
     except Exception:
-        return [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
+        return [
+            {"name": "kubernetes-mcp", "url": "http://127.0.0.1:3000/mcp", "description": "Kubernetes MCP"},
+            {"name": "argocd-mcp", "url": "http://127.0.0.1:3001/mcp", "description": "ArgoCD MCP"},
+            {"name": "jenkins-mcp", "url": "http://127.0.0.1:3002/mcp", "description": "Jenkins MCP"}
+        ]
 
-servers = load_servers() or [{"name": "default", "url": "http://127.0.0.1:3000/mcp", "description": "Fallback server"}]
+
+servers = load_servers()
 
 
 # ================= HELPERS =================
-def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
+def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None,
+                    server_url: Optional[str] = None, timeout: int = 20) -> Dict[str, Any]:
+    """Send JSON-RPC request to MCP server."""
     url = server_url or servers[0]["url"]
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream, /"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream, */*"}
 
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
-        text = res.text.strip()
 
-        # handle SSE-like responses where lines start with data:
-        if "data:" in text:
+        text = res.text.strip()
+        if "data:" in text:  # Handle SSE-like streaming
             for line in text.splitlines():
                 if line.startswith("data:"):
                     try:
@@ -73,6 +77,7 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
 
 
 def list_mcp_tools(server_url: Optional[str] = None) -> list:
+    """List available tools from a given MCP server."""
     resp = call_mcp_server("tools/list", server_url=server_url)
     if isinstance(resp, dict):
         result = resp.get("result")
@@ -84,323 +89,151 @@ def list_mcp_tools(server_url: Optional[str] = None) -> list:
 
 
 def call_tool(name: str, arguments: dict, server_url: Optional[str] = None) -> Dict[str, Any]:
+    """Execute a specific MCP tool on a server."""
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments or {}}, server_url=server_url)
 
 
-user_prompt_global = ""
-
-
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize arguments format for tools."""
     if not args:
         return {}
     fixed = dict(args)
-
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
-
-    user_keywords_for_all = ["all", "everything", "show me all", "entire cluster", "across all", "all namespaces"]
-    namespace_val = str(fixed.get("namespace", "")).lower()
-
-    if any(kw in user_prompt_global.lower() for kw in user_keywords_for_all) or \
-       namespace_val in ["all", "all-namespaces", "everything", "*"]:
-        fixed["allNamespaces"] = True
-        fixed.pop("namespace", None)
-
-    if fixed.get("resourceType") == "pods" and "namespace" not in fixed and not fixed.get("allNamespaces"):
-        fixed["namespace"] = "default"
-
     return fixed
 
 
-# ================= GEMINI TOOL ROUTER (WITH FALLBACK) =================
+# ================= SMART ROUTER =================
 def ask_gemini_for_tool_and_server(query: str, retries: int = 2) -> Dict[str, Any]:
-    """Try Gemini first, fallback to hardcoded rules if it fails."""
-
-    # ✅ HARDCODED FALLBACK RULES — NO GEMINI NEEDED
+    """Decide best server + tool using rules or Gemini AI."""
     query_lower = query.lower()
 
-    if "pod" in query_lower and ("all" in query_lower or "list" in query_lower or "show" in query_lower):
-        return {
-            "tool": "kubectl_get",
-            "args": {"resourceType": "pods", "allNamespaces": True},
-            "server": "default",
-            "explanation": "💡 Fallback: Detected 'pods' request → using kubectl_get."
-        }
+    # Simple rule-based routing
+    if any(word in query_lower for word in ["pod", "namespace", "service", "deployment", "pvc", "node"]):
+        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True},
+                "server": "kubernetes-mcp", "explanation": "Querying Kubernetes cluster resources"}
 
-    if "namespace" in query_lower and ("all" in query_lower or "list" in query_lower):
-        return {
-            "tool": "kubectl_get",
-            "args": {"resourceType": "namespaces"},
-            "server": "default",
-            "explanation": "💡 Fallback: Detected 'namespaces' request → using kubectl_get."
-        }
+    if "argo" in query_lower or "argocd" in query_lower or "application" in query_lower:
+        return {"tool": "list_applications", "args": {}, "server": "argocd-mcp",
+                "explanation": "Querying ArgoCD for applications"}
 
-    if "service" in query_lower and ("all" in query_lower or "list" in query_lower):
-        return {
-            "tool": "kubectl_get",
-            "args": {"resourceType": "services", "allNamespaces": True},
-            "server": "default",
-            "explanation": "💡 Fallback: Detected 'services' request → using kubectl_get."
-        }
+    if "jenkins" in query_lower or "pipeline" in query_lower or "job" in query_lower or "credential" in query_lower:
+        return {"tool": "list_jobs", "args": {}, "server": "jenkins-mcp",
+                "explanation": "Querying Jenkins for jobs/credentials"}
 
-    if "deployment" in query_lower and ("all" in query_lower or "list" in query_lower):
-        return {
-            "tool": "kubectl_get",
-            "args": {"resourceType": "deployments", "allNamespaces": True},
-            "server": "default",
-            "explanation": "💡 Fallback: Detected 'deployments' request → using kubectl_get."
-        }
-
-    # ✅ ONLY USE GEMINI IF FALLBACK DOESN’T MATCH
+    # If Gemini not available, fallback
     if not GEMINI_AVAILABLE:
-        return {
-            "tool": None,
-            "args": None,
-            "server": None,
-            "explanation": "⚠ Gemini unavailable. Try: 'show me all pods', 'list namespaces', etc."
-        }
+        return {"tool": None, "args": None, "server": None, "explanation": "⚠ No Gemini, using fallback."}
 
+    # Use Gemini AI for flexible queries
     tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"]) if isinstance(t, dict)]
     server_names = [s["name"] for s in servers]
 
     instruction = f"""
-You are an AI router. Map user query to ONE MCP tool and ONE server.
+    You are an AI router.
+    User: "{query}"
+    Servers: {json.dumps(server_names)}
+    Tools: {json.dumps(tool_names)}
+    Decide the best <tool> and <server>.
+    Return strict JSON only:
+    {{"tool": "<tool_name>", "args": {{"resourceType": "..."}}, "server": "<server_name>", "explanation": "short reason"}}
+    """
 
-User: "{query}"
-Servers: {json.dumps(server_names)}
-Tools: {json.dumps(tool_names)}
-
-Return STRICT JSON:
-{{"tool": "<tool_name>", "args": {{"resourceType": "...", "allNamespaces": true}}, "server": "<server_name>", "explanation": "short"}}
-
-Example for "show me all pods":
-{{"tool": "kubectl_get", "args": {{"resourceType": "pods", "allNamespaces": true}}, "server": "default", "explanation": "Fetching all pods"}}
-
-Do NOT answer the question. Only return JSON.
-"""
-
-    for attempt in range(retries):
+    for _ in range(retries):
         try:
             model = genai.GenerativeModel(GEMINI_MODEL)
             resp = model.generate_content(instruction, generation_config={"temperature": 0.0})
             text = getattr(resp, "text", str(resp)).strip()
 
-            # Extract JSON if wrapped in json or markdown
             if "json" in text:
-                start = text.find("json") + 7
-                end = text.rfind("")
-                text = text[start:end] if end > start else text
+                text = text.split("json")[1].split("\n")[0].strip()
 
-            parsed = None
-            if "{" in text:
-                try:
-                    parsed = json.loads(text)
-                except Exception:
-                    import re
-                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                    if json_match:
-                        parsed = json.loads(json_match.group())
+            parsed = json.loads(text)
+            parsed["args"] = sanitize_args(parsed.get("args") or {})
+            return parsed
+        except Exception:
+            continue
 
-            if isinstance(parsed, dict):
-                parsed["args"] = sanitize_args(parsed.get("args") or {})
-                if parsed.get("tool"):
-                    return parsed
-
-        except Exception as e:
-            if attempt == retries - 1:
-                st.warning(f"⚠ Gemini routing failed: {e}")
-
-    # Final fallback
-    return {
-        "tool": None,
-        "args": None,
-        "server": None,
-        "explanation": "⚠ Gemini failed. Try simple commands like 'show me all pods'."
-    }
+    return {"tool": None, "args": None, "server": None, "explanation": "⚠ Gemini failed"}
 
 
-# ================= OUTPUT FORMATTER =================
+# ================= OUTPUT =================
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Convert raw response into natural, human-friendly bullet points."""
-
-    # For "all resources" — summarize
-    if "all resources" in user_input.lower():
-        try:
-            clean_summary = {}
-            raw_summary = raw_response
-
-            for rtype, data in raw_summary.items():
-                items = []
-                result = data.get("result", data) if isinstance(data, dict) else data
-                if isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, dict):
-                            name = item.get("name", "Unnamed")
-                            namespace = item.get("namespace", "default")
-                            status = item.get("status", "Unknown")
-                            items.append(f"{name} ({namespace}, {status})")
-                clean_summary[rtype] = items
-
-            if GEMINI_AVAILABLE:
-                model = genai.GenerativeModel(GEMINI_MODEL)
-                prompt = (
-                    f"User asked: {user_input}\n\n"
-                    f"Cluster contains these resources:\n{json.dumps(clean_summary, indent=2)}\n\n"
-                    "Summarize this in clear, natural English bullet points. Group by resource type. "
-                    "Example: • Pods: 5 running in argocd, 20 succeeded in default\n"
-                    "DO NOT show raw JSON. Keep it concise."
-                )
-                resp = model.generate_content(prompt)
-                answer = getattr(resp, "text", str(resp)).strip()
-
-                lines = [line.strip() for line in answer.splitlines() if line.strip()]
-                html_list = "<ul style='margin: 0; padding-left: 1.5rem;'>" + \
-                           "".join([f"<li style='margin-bottom: 0.3rem;'>• {line}</li>" for line in lines]) + \
-                           "</ul>"
-                return html_list
-
-            else:
-                parts = []
-                for rtype, items in clean_summary.items():
-                    count = len(items) if isinstance(items, list) else 0
-                    parts.append(f"• {rtype.capitalize()}: {count} items")
-                return "<ul>" + "".join([f"<li>{p}</li>" for p in parts]) + "</ul>"
-
-        except Exception as e:
-            return f"<p>⚠ Summarization failed: {str(e)}</p>"
-
-    # Normal case — format as clean bullets
+    """Convert raw response into a human-readable string."""
     try:
-        items = []
-        result = raw_response.get("result", raw_response) if isinstance(raw_response, dict) else raw_response
-
+        result = raw_response.get("result", raw_response)
         if isinstance(result, list):
-            for item in result:
-                if isinstance(item, dict):
-                    name = item.get("name", "Unnamed")
-                    namespace = item.get("namespace", "default")
-                    status = item.get("status", "Unknown")
-                    items.append(f"• {name} ({namespace}, {status})")
-                else:
-                    items.append(f"• {item}")
+            return "\n".join([json.dumps(r) for r in result])
         elif isinstance(result, str):
-            lines = [line.strip() for line in result.splitlines() if line.strip()]
-            items = [f"• {line}" for line in lines]
-        else:
-            items.append(f"• {str(result)}")
-
-        if items:
-            html_list = "<ul style='margin: 0; padding-left: 1.5rem; line-height: 1.4;'>" + \
-                       "".join([f"<li>{item}</li>" for item in items]) + \
-                       "</ul>"
-            return html_list
-
-    except Exception as e:
-        pass
-
-    return f"<pre style='background:#f4f4f4; padding:10px; border-radius:5px;'>{json.dumps(raw_response, indent=2)}</pre>"
+            return result
+        return json.dumps(result, indent=2)
+    except Exception:
+        return str(raw_response)
 
 
-# ================= CLUSTER SUMMARY =================
-RESOURCE_TYPES = [
-    "pods",
-    "services",
-    "deployments",
-    "jobs",
-    "cronjobs",
-    "configmaps",
-    "secrets",
-    "ingresses",
-    "namespaces",
-    "nodes",
-    "pv",
-    "pvc"
-]
+def ask_gemini_prettify(user_input: str, response: Any) -> str:
+    """Use Gemini to prettify raw JSON into clean text."""
+    if not GEMINI_AVAILABLE:
+        return ask_gemini_answer(user_input, response)
 
-
-def get_cluster_summary(server_url: str) -> dict:
-    summary = {}
-    for r in RESOURCE_TYPES:
-        resp = call_tool("kubectl_get", {"resourceType": r, "allNamespaces": True}, server_url)
-        if isinstance(resp, dict) and "result" in resp:
-            summary[r] = resp["result"]
-        else:
-            summary[r] = resp
-    return summary
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        prompt = (
+            f"User asked: {user_input}\n\n"
+            f"Raw response:\n{json.dumps(response, indent=2)}\n\n"
+            "Convert to clear plain text for admin (no JSON, no markdown)."
+        )
+        resp = model.generate_content(prompt, generation_config={"temperature": 0.0, "max_output_tokens": 512})
+        return getattr(resp, "text", str(resp)).strip()
+    except Exception:
+        return ask_gemini_answer(user_input, response)
 
 
 # ================= STREAMLIT APP =================
 def main():
-    st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="Masa Bot Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
+    # Init session state
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
+    # Display chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg.get("role", "assistant")):
-            content = msg.get("content", "")
-            if isinstance(content, str) and ("<ul>" in content or "<li>" in content or "<pre>" in content):
-                st.markdown(content, unsafe_allow_html=True)
-            else:
-                st.markdown(content)
+            st.markdown(msg.get("content", ""))
 
-    user_prompt = st.chat_input("Ask Kubernetes or ArgoCD something...")
+    # User input
+    user_prompt = st.chat_input("Ask Kubernetes, ArgoCD, Jenkins...")
     if not user_prompt:
         return
-
-    global user_prompt_global
-    user_prompt_global = user_prompt
 
     st.session_state["messages"].append({"role": "user", "content": user_prompt})
     st.chat_message("user").markdown(user_prompt)
 
-    # Handle "all resources"
-    if "all resources" in user_prompt.lower():
-        explanation = "💡 Fetching and summarizing full cluster state (all namespaces, all types)."
-        st.session_state["messages"].append({"role": "assistant", "content": explanation})
-        st.chat_message("assistant").markdown(explanation)
-
-        server_url = servers[0]["url"]
-        summary = get_cluster_summary(server_url)
-        final_answer = ask_gemini_answer(user_prompt, summary)
-
-        st.session_state["messages"].append({"role": "assistant", "content": final_answer})
-        with st.chat_message("assistant"):
-            st.markdown(final_answer, unsafe_allow_html=True)
-        return
-
-    # ✅ TOOL SELECTION — GEMINI OR FALLBACK
+    # Smart routing
     decision = ask_gemini_for_tool_and_server(user_prompt)
-    explanation = decision.get("explanation", "Tool decision produced.")
-    st.session_state["messages"].append({"role": "assistant", "content": explanation})
-    st.chat_message("assistant").markdown(explanation)
+    st.chat_message("assistant").markdown(f"🧠 Routing → {decision.get('server')} → {decision.get('tool')}")
 
     if not decision.get("tool"):
-        answer = "⚠ Could not determine tool. Try: 'show me all pods', 'list namespaces', 'get all services'."
+        answer = "⚠ Could not determine tool. Try again with cluster/argo/jenkins query."
         st.session_state["messages"].append({"role": "assistant", "content": answer})
         st.chat_message("assistant").markdown(answer)
         return
 
-    # Execute tool
-    server_url = next((s["url"] for s in servers if s["name"] == decision.get("server")), servers[0]["url"])
-    tool_name = decision.get("tool")
-    tool_args = decision.get("args") or {}
+    # Call tool
+    server_url = next((s["url"] for s in servers if s["name"] == decision["server"]), servers[0]["url"])
+    resp = call_tool(decision["tool"], decision.get("args") or {}, server_url=server_url)
 
-    st.chat_message("assistant").markdown(
-        f"🔧 Executing {tool_name} on server {decision.get('server')} with arguments:\njson\n{json.dumps(tool_args, indent=2)}\n"
-    )
-
-    resp = call_tool(tool_name, tool_args, server_url=server_url)
-
+    # Prettify response
     if not resp or "error" in resp:
-        final_answer = f"⚠ Execution failed: {resp.get('error', 'Unknown error') if isinstance(resp, dict) else str(resp)}"
+        final_answer = f"⚠ Execution failed: {resp.get('error', 'Unknown error')}"
     else:
-        final_answer = ask_gemini_answer(user_prompt, resp)
+        final_answer = ask_gemini_prettify(user_prompt, resp)
 
+    # Save + show response
     st.session_state["messages"].append({"role": "assistant", "content": final_answer})
-    with st.chat_message("assistant"):
-        st.markdown(final_answer, unsafe_allow_html=True)
+    st.chat_message("assistant").markdown(final_answer)
 
 
 if __name__ == "__main__":
