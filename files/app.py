@@ -5,13 +5,12 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import re
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCeUhwJf1-qRz2wy3y680JNXmpcG6LkfhQ")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Configure Gemini if available
@@ -30,39 +29,16 @@ def load_servers() -> list:
             data = json.load(f)
         return data.get("servers", [])
     except Exception:
-        # Fallback to your actual server URLs
-        return [
-            {
-                "name": "kubernetes-mcp",
-                "url": "http://13.221.252.52:3000/mcp",
-                "description": "Primary Kubernetes MCP server"
-            },
-            {
-                "name": "argocd-mcp",
-                "url": "http://13.222.157.210:3000/mcp",
-                "description": "Development cluster MCP server"
-            },
-            {
-                "name": "jenkins-mcp",
-                "url": "http://54.227.78.211:8082/mcp",
-                "description": "Staging Kubernetes MCP server"
-            }
-        ]
+        return []
 
 SERVERS = load_servers()
-SERVER_NAMES = [s["name"] for s in SERVERS]
 
 # Initialize session state
-if "current_server" not in st.session_state:
-    st.session_state["current_server"] = SERVERS[0]["url"]
-
-if "session" not in st.session_state:
-    st.session_state.session = None
-    st.session_state.username = None
-    st.session_state.access = []
+if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
+    st.session_state.available_servers = SERVERS
 
 # ---------------- HELPERS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
@@ -186,6 +162,42 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
         pass
     return None
 
+def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
+    """Automatically detect which server to use based on query content."""
+    query_lower = query.lower()
+    
+    # Check each server's tools to see which one matches the query
+    for server in available_servers:
+        try:
+            tools = list_mcp_tools(server["url"])
+            tool_names = [t.get("name", "").lower() for t in tools if t.get("name")]
+            
+            # Check if any tool name is mentioned in the query
+            for tool_name in tool_names:
+                if tool_name in query_lower:
+                    return server
+            
+            # Check for common keywords that match server types
+            server_name = server["name"].lower()
+            if ("kubernetes" in query_lower or "k8s" in query_lower or 
+                "pod" in query_lower or "namespace" in query_lower or
+                "deployment" in query_lower or "service" in query_lower) and "kubernetes" in server_name:
+                return server
+                
+            if ("jenkins" in query_lower or "job" in query_lower or 
+                "build" in query_lower or "pipeline" in query_lower) and "jenkins" in server_name:
+                return server
+                
+            if ("argocd" in query_lower or "application" in query_lower or 
+                "gitops" in query_lower or "sync" in query_lower) and "argocd" in server_name:
+                return server
+                
+        except Exception:
+            continue
+    
+    # If no specific server detected, return the first available one
+    return available_servers[0] if available_servers else None
+
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
@@ -210,9 +222,6 @@ Rules:
 - Only choose from the tools above.
 - If the query clearly maps to a tool, return tool + args in JSON.
 - If unsure, set tool=null and args=null.
-- For Kubernetes queries, common tools are: kubectl_get, kubectl_describe, kubectl_logs
-- For Jenkins queries, common tools are: list_jobs, get_job_details, trigger_build
-- For ArgoCD queries, common tools are: list_applications, get_application, sync_application
 
 Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
@@ -363,38 +372,18 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 MaSaOps Bot")
 
-    # Sidebar with server selection and settings
+    # Sidebar with settings
     with st.sidebar:
-        st.header("🔧 Server Configuration")
-        
-        # Server selection
-        server_options = {s["name"]: s["url"] for s in SERVERS}
-        selected_server_name = st.selectbox(
-            "Select MCP Server",
-            options=list(server_options.keys()),
-            index=0
-        )
-        st.session_state["current_server"] = server_options[selected_server_name]
-        
-        st.write(f"**Connected to:** {selected_server_name}")
-        st.write(f"**URL:** {st.session_state.current_server}")
-        
-        # Test connection button
-        if st.button("Test Connection"):
-            with st.spinner("Testing connection..."):
-                tools = list_mcp_tools(st.session_state.current_server)
-                if tools:
-                    st.success(f"✅ Connected! Found {len(tools)} tools")
-                    st.json([t.get("name", "unnamed") for t in tools])
-                else:
-                    st.error("❌ Connection failed or no tools found")
-        
-        st.header("👤 Profile")
-        if st.session_state.username:
-            st.write(f"*Username:* {st.session_state.username}")
-            st.write(f"*Access:* {', '.join(st.session_state.access) if st.session_state.access else 'All servers'}")
-        
         st.header("⚙️ Settings")
+        
+        # Server discovery
+        if st.button("Discover Available Servers"):
+            with st.spinner("Discovering MCP servers..."):
+                # You can add logic here to auto-discover servers if needed
+                st.success(f"Found {len(SERVERS)} servers")
+                for server in SERVERS:
+                    st.write(f"• {server['name']}: {server['url']}")
+        
         st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
         
         if st.button("Clear Chat History"):
@@ -420,13 +409,26 @@ def main():
     with st.chat_message("user"):
         st.markdown(user_prompt)
     
-    # Determine which server to use based on query content
-    selected_server_url = st.session_state.current_server
-    selected_server_name = [name for name, url in server_options.items() if url == selected_server_url][0]
+    # Auto-detect which server to use based on query
+    with st.spinner("🔍 Finding the right server for your query..."):
+        selected_server = detect_server_from_query(user_prompt, SERVERS)
+    
+    if not selected_server:
+        error_msg = "No MCP servers available. Please check your servers.json file."
+        st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        with st.chat_message("assistant"):
+            st.error(error_msg)
+        return
+    
+    # Show which server we're using
+    server_info = f"🤖 Using server: **{selected_server['name']}**"
+    st.session_state.messages.append({"role": "assistant", "content": server_info})
+    with st.chat_message("assistant"):
+        st.markdown(server_info)
     
     # Use Gemini to determine the best tool and arguments
     with st.spinner("🤔 Analyzing your request..."):
-        decision = ask_gemini_for_tool_decision(user_prompt, selected_server_url)
+        decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
     
     explanation = decision.get("explanation", "I'm figuring out how to help you...")
     st.session_state.messages.append({"role": "assistant", "content": f"💡 {explanation}"})
@@ -439,11 +441,11 @@ def main():
     # Execute tool if one was selected
     if tool_name:
         with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}` on {selected_server_name}...")
+            st.markdown(f"🔧 Executing `{tool_name}`...")
         
         # Call the tool
         with st.spinner("🔄 Processing your request..."):
-            resp = call_tool(selected_server_url, tool_name, tool_args)
+            resp = call_tool(selected_server["url"], tool_name, tool_args)
         
         # Generate human-readable response
         with st.spinner("📝 Formatting response..."):
