@@ -1,9 +1,8 @@
-# app.py — SMART ROUTING VERSION
+# app.py — PURE GEMINI ROUTING VERSION
 
 # ================= IMPORTS =================
 import os
 import json
-import time
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -14,7 +13,6 @@ import google.generativeai as genai
 # ================= CONFIG =================
 load_dotenv()
 
-# ✅ USE gemini-2.0-flash-lite
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyD_ZoULiDzQO_ws6GrNvclHyuGbAL1nkIc")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
 
@@ -54,21 +52,10 @@ def call_mcp_server(method: str, params: Optional[Dict[str, Any]] = None, server
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
-        text = res.text.strip()
-
-        if "data:" in text:
-            for line in text.splitlines():
-                if line.startswith("data:"):
-                    try:
-                        return json.loads(line[5:].strip())
-                    except Exception:
-                        return {"result": line[5:].strip()}
-
         try:
             return res.json()
         except ValueError:
             return {"result": res.text}
-
     except requests.exceptions.RequestException as e:
         return {"error": f"MCP server request failed: {str(e)}"}
 
@@ -88,47 +75,44 @@ def call_tool(name: str, arguments: dict, server_url: Optional[str] = None) -> D
     return call_mcp_server("tools/call", {"name": name, "arguments": arguments or {}}, server_url=server_url)
 
 
-# ================= ARG PARSER =================
+# ================= GEMINI ROUTER =================
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not args:
         return {}
     fixed = dict(args)
-
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
-
     return fixed
 
 
-# ================= SMART ROUTER =================
 def ask_gemini_for_tool_and_server(query: str, retries: int = 2) -> Dict[str, Any]:
-    query_lower = query.lower()
-
-    # Simple rule-based routing
-    if any(word in query_lower for word in ["pod", "namespace", "service", "deployment", "pvc", "node"]):
-        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True}, "server": "kubernetes-mcp", "explanation": "Querying Kubernetes cluster resources"}
-    if "argo" in query_lower or "argocd" in query_lower or "application" in query_lower:
-        return {"tool": "list_applications", "args": {}, "server": "argocd-mcp", "explanation": "Querying ArgoCD for applications"}
-    if "jenkins" in query_lower or "pipeline" in query_lower or "job" in query_lower or "credential" in query_lower:
-        return {"tool": "list_jobs", "args": {}, "server": "jenkins-mcp", "explanation": "Querying Jenkins for jobs/credentials"}
-
-    # If Gemini not available, fallback
     if not GEMINI_AVAILABLE:
-        return {"tool": None, "args": None, "server": None, "explanation": "⚠ No Gemini, try simple query."}
+        return {"tool": None, "args": None, "server": None, "explanation": "⚠ Gemini not available"}
 
-    # Use Gemini AI for flexible queries
-    tool_names = [t.get("name") for s in servers for t in list_mcp_tools(s["url"]) if isinstance(t, dict)]
+    # Collect tools + servers dynamically
+    all_tools = {}
+    for s in servers:
+        for t in list_mcp_tools(s["url"]):
+            if isinstance(t, dict) and "name" in t:
+                all_tools[t["name"]] = s["name"]
+
     server_names = [s["name"] for s in servers]
+    tool_names = list(all_tools.keys())
 
     instruction = f"""
-You are an AI router. 
-User: "{query}"
+You are an AI router.
+User asked: "{query}"
 Servers: {json.dumps(server_names)}
 Tools: {json.dumps(tool_names)}
 
 Decide the best <tool> and <server>. 
 Return strict JSON only:
-{{"tool": "<tool_name>", "args": {{"resourceType": "..."}}, "server": "<server_name>", "explanation": "short reason"}}
+{{
+  "tool": "<tool_name>",
+  "args": {{"resourceType": "...", "namespace": "..."}},
+  "server": "<server_name>",
+  "explanation": "short reason"
+}}
 """
 
     for _ in range(retries):
@@ -137,8 +121,10 @@ Return strict JSON only:
             resp = model.generate_content(instruction, generation_config={"temperature": 0.0})
             text = getattr(resp, "text", str(resp)).strip()
 
-            if "json" in text:
-                text = text.split("json")[1].split("```")[0].strip()
+            if "```" in text:  # strip code fences
+                text = text.split("```")[1].strip()
+                if text.startswith("json"):
+                    text = text[4:].strip()
 
             parsed = json.loads(text)
             parsed["args"] = sanitize_args(parsed.get("args") or {})
@@ -146,7 +132,7 @@ Return strict JSON only:
         except Exception:
             continue
 
-    return {"tool": None, "args": None, "server": None, "explanation": "⚠ Gemini failed"}
+    return {"tool": None, "args": None, "server": None, "explanation": "⚠ Gemini failed to choose"}
 
 
 # ================= OUTPUT =================
