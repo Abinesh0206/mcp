@@ -219,5 +219,5 @@ def main():
     st.chat_message("assistant").markdown(final_answer)
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
