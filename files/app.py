@@ -133,6 +133,11 @@ def sanitize_args(args: dict):
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
     
+    # Handle "all resources" request
+    if fixed.get("resourceType") == "all":
+        fixed["allResources"] = True
+        fixed.pop("resourceType", None)
+    
     # Handle common Kubernetes resource types
     resource_mappings = {
         "ns": "namespaces",
@@ -141,7 +146,8 @@ def sanitize_args(args: dict):
         "deploy": "deployments",
         "svc": "services",
         "cm": "configmaps",
-        "secret": "secrets"
+        "secret": "secrets",
+        "all": "all"
     }
     
     if fixed.get("resourceType") in resource_mappings:
@@ -179,17 +185,27 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
             
             # Check for common keywords that match server types
             server_name = server["name"].lower()
-            if ("kubernetes" in query_lower or "k8s" in query_lower or 
-                "pod" in query_lower or "namespace" in query_lower or
-                "deployment" in query_lower or "service" in query_lower) and "kubernetes" in server_name:
+            
+            # Kubernetes queries
+            if (("kubernetes" in query_lower or "k8s" in query_lower or 
+                 "pod" in query_lower or "namespace" in query_lower or
+                 "deployment" in query_lower or "service" in query_lower or
+                 "secret" in query_lower or "configmap" in query_lower or
+                 "node" in query_lower or "cluster" in query_lower or
+                 "resource" in query_lower) and 
+                ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
-            if ("jenkins" in query_lower or "job" in query_lower or 
-                "build" in query_lower or "pipeline" in query_lower) and "jenkins" in server_name:
+            # Jenkins queries
+            if (("jenkins" in query_lower or "job" in query_lower or 
+                 "build" in query_lower or "pipeline" in query_lower) and 
+                "jenkins" in server_name):
                 return server
                 
-            if ("argocd" in query_lower or "application" in query_lower or 
-                "gitops" in query_lower or "sync" in query_lower) and "argocd" in server_name:
+            # ArgoCD queries
+            if (("argocd" in query_lower or "application" in query_lower or 
+                 "gitops" in query_lower or "sync" in query_lower) and 
+                "argocd" in server_name):
                 return server
                 
         except Exception:
@@ -197,6 +213,39 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
     
     # If no specific server detected, return the first available one
     return available_servers[0] if available_servers else None
+
+def get_all_cluster_resources(server_url: str):
+    """Get all resources in the cluster by querying multiple resource types."""
+    resource_types = [
+        "pods", "services", "deployments", "configmaps", 
+        "secrets", "namespaces", "nodes"
+    ]
+    
+    all_resources = {}
+    
+    for resource_type in resource_types:
+        try:
+            response = call_tool(server_url, "kubectl_get", {
+                "resourceType": resource_type,
+                "allNamespaces": True
+            })
+            
+            if response and not response.get("error"):
+                result = response.get("result", {})
+                if isinstance(result, dict) and "items" in result:
+                    all_resources[resource_type] = result["items"]
+                else:
+                    all_resources[resource_type] = result
+            else:
+                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
+                
+            # Small delay to avoid overwhelming the server
+            time.sleep(0.1)
+            
+        except Exception as e:
+            all_resources[resource_type] = f"Exception: {str(e)}"
+    
+    return all_resources
 
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
@@ -221,13 +270,47 @@ Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 Rules:
 - Only choose from the tools above.
 - If the query clearly maps to a tool, return tool + args in JSON.
+- If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
 - If unsure, set tool=null and args=null.
 
 Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
     if not GEMINI_AVAILABLE:
-        return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
+        # Fallback logic for common queries
+        query_lower = query.lower()
+        if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "all", "allNamespaces": True},
+                "explanation": "User wants to see all resources in cluster"
+            }
+        elif "pods" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "pods", "allNamespaces": True},
+                "explanation": "User wants to see all pods"
+            }
+        elif "services" in query_lower or "svc" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "services", "allNamespaces": True},
+                "explanation": "User wants to see all services"
+            }
+        elif "secrets" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "secrets", "allNamespaces": True},
+                "explanation": "User wants to see all secrets"
+            }
+        elif "nodes" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "nodes"},
+                "explanation": "User wants to see all nodes"
+            }
+        else:
+            return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -319,6 +402,20 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
                 else:
                     return "No namespaces found."
+            
+            if "pod" in user_input.lower():
+                pods = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+                if pods:
+                    return f"Found {count} pods:\n" + "\n".join([f"• {pod}" for pod in pods])
+                else:
+                    return "No pods found."
+            
+            if "secret" in user_input.lower():
+                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+                if secrets:
+                    return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
+                else:
+                    return "No secrets found."
         
         # Jenkins-style responses
         if "jobs" in result:
@@ -379,7 +476,6 @@ def main():
         # Server discovery
         if st.button("Discover Available Servers"):
             with st.spinner("Discovering MCP servers..."):
-                # You can add logic here to auto-discover servers if needed
                 st.success(f"Found {len(SERVERS)} servers")
                 for server in SERVERS:
                     st.write(f"• {server['name']}: {server['url']}")
@@ -443,9 +539,16 @@ def main():
         with st.chat_message("assistant"):
             st.markdown(f"🔧 Executing `{tool_name}`...")
         
-        # Call the tool
-        with st.spinner("🔄 Processing your request..."):
-            resp = call_tool(selected_server["url"], tool_name, tool_args)
+        # Special handling for "all resources" request
+        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
+            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
+            with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
+                all_resources = get_all_cluster_resources(selected_server["url"])
+                resp = {"result": all_resources}
+        else:
+            # Call the tool normally
+            with st.spinner("🔄 Processing your request..."):
+                resp = call_tool(selected_server["url"], tool_name, tool_args)
         
         # Generate human-readable response
         with st.spinner("📝 Formatting response..."):
@@ -463,7 +566,10 @@ def main():
             "**For Kubernetes:**\n"
             "- \"List all namespaces\"\n"
             "- \"Show running pods\"\n"
-            "- \"Get cluster nodes\"\n\n"
+            "- \"Get cluster nodes\"\n"
+            "- \"Show all services\"\n"
+            "- \"List all secrets\"\n"
+            "- \"Show all resources in cluster\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
             "- \"Show build status\"\n\n"
