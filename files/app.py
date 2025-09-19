@@ -44,7 +44,7 @@ def load_servers() -> list:
             },
             {
                 "name": "jenkins-mcp",
-                "url": "http://3.80.48.199:8080/mcp",
+                "url": "http://54.227.78.211:8082/mcp",
                 "description": "Staging Kubernetes MCP server"
             }
         ]
