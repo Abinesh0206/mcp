@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 # ---------------- CONFIG ----------------
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Configure Gemini SDK
@@ -31,9 +31,9 @@ def load_servers():
         return data.get("servers", []) or []
     except Exception:
         return [
-            {"name": "kubernetes-mcp", "url": "http://127.0.0.1:3001/mcp", "description": "Kubernetes MCP"},
-            {"name": "argocd-mcp", "url": "http://127.0.0.1:3002/mcp", "description": "ArgoCD MCP"},
-            {"name": "jenkins-mcp", "url": "http://127.0.0.1:3003/mcp", "description": "Jenkins MCP"},
+            {"name": "kubernetes-mcp", "url": "http://13.221.252.52:3000/mcp", "description": "Primary Kubernetes MCP"},
+            {"name": "argocd-mcp", "url": "http://13.222.157.210:3000/mcp", "description": "ArgoCD MCP"},
+            {"name": "jenkins-mcp", "url": "http://3.80.48.199:8080/mcp", "description": "Jenkins MCP"},
         ]
 
 servers = load_servers()
@@ -76,7 +76,6 @@ def call_mcp_server(method: str, params: dict = None):
 
 
 def list_mcp_tools(server_url: str):
-    """Fetch available tools from a specific MCP server."""
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
     try:
         res = requests.post(
@@ -128,7 +127,6 @@ def sanitize_args(args: dict):
 
 # ---------------- GEMINI DECISION HELPERS ----------------
 def ask_gemini_for_server_and_tool(query: str):
-    """Step 1: decide server. Step 2: choose valid tool from that server."""
     server_instruction = f"""
 User query: "{query}"
 
@@ -146,15 +144,13 @@ Respond JSON only:
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(server_instruction)
-        text = response.text.strip()
-        parsed = json.loads(text[text.find("{"): text.rfind("}")+1])
+        parsed = json.loads(response.text.strip())
         server = parsed.get("server")
         explanation = parsed.get("explanation", "")
 
         if not server or server not in server_map:
             return {"server": None, "tool": None, "args": None, "explanation": explanation}
 
-        # Step 2: fetch tools from that server
         tools = list_mcp_tools(server_map[server])
         tool_names = [t["name"] for t in tools]
 
@@ -168,8 +164,7 @@ Strict JSON only:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "short reasoning"}}
 """
         response2 = model.generate_content(tool_instruction)
-        text2 = response2.text.strip()
-        parsed2 = json.loads(text2[text2.find("{"): text2.rfind("}")+1])
+        parsed2 = json.loads(response2.text.strip())
 
         return {
             "server": server,
@@ -186,6 +181,7 @@ def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
     st.title("🤖 Masa Bot Assistant")
 
+    # Sidebar
     st.sidebar.subheader("🌐 Available MCP Servers")
     for s in servers:
         st.sidebar.write(f"- **{s['name']}** → {s['url']}")
@@ -193,15 +189,20 @@ def main():
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
 
+    # Chat history
     for msg in st.session_state["messages"]:
         with st.chat_message(msg.get("role", "assistant")):
             st.markdown(msg.get("content", ""))
 
-    with st.form("user_input_form", clear_on_submit=True):
-        user_input = st.text_input("Ask anything (Kubernetes / ArgoCD / Jenkins)...")
-        submitted = st.form_submit_button("Send")
+    # Fixed input at bottom with 🚀 button
+    st.markdown("---")
+    cols = st.columns([8, 1])
+    with cols[0]:
+        user_input = st.text_input("Ask anything (Kubernetes / ArgoCD / Jenkins)...", key="chat_input")
+    with cols[1]:
+        send_clicked = st.button("🚀")
 
-    if submitted and user_input:
+    if send_clicked and user_input:
         st.session_state["messages"].append({"role": "user", "content": user_input})
         st.chat_message("user").markdown(user_input)
 
