@@ -38,7 +38,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
-    st.session_state.last_known_namespace = None  # ✅ NEW: Track last namespace
+    st.session_state.last_known_namespace = None
     st.session_state.available_servers = SERVERS
 
 # ---------------- HELPERS ----------------
@@ -110,7 +110,7 @@ def call_tool(server_url: str, name: str, arguments: dict):
     })
 
 def sanitize_args(args: dict, user_query: str = ""):
-    """Fix arguments before sending to MCP tools — now with namespace extraction from query."""
+    """Fix arguments before sending to MCP tools."""
     if not args:
         args = {}
 
@@ -118,7 +118,6 @@ def sanitize_args(args: dict, user_query: str = ""):
     
     # Extract namespace from user query if not provided
     if "namespace" not in fixed and user_query:
-        # Patterns: "in ns X", "in namespace X", "-n X", "X namespace"
         patterns = [
             r"in\s+ns\s+(\S+)",
             r"in\s+namespace\s+(\S+)",
@@ -148,7 +147,12 @@ def sanitize_args(args: dict, user_query: str = ""):
     elif fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = st.session_state.get("last_known_namespace", "default")
     
-    # Handle "all namespaces"
+    # Handle "all namespaces" - FIXED: Always show all pods when requested
+    if "all pods" in user_query.lower() or "ella pod" in user_query.lower() or "all namespace" in user_query.lower():
+        fixed["allNamespaces"] = True
+        fixed.pop("namespace", None)
+    
+    # Handle "all namespaces" for any resource
     elif fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
@@ -361,6 +365,22 @@ def get_pending_pods_with_reason(server_url: str):
     except Exception as e:
         return [{"error": f"Exception while checking pending pods: {str(e)}"}]
 
+def get_all_pods_all_namespaces(server_url: str):
+    """Get all pods from all namespaces - FIXED VERSION"""
+    try:
+        response = call_tool(server_url, "kubectl_get", {
+            "resourceType": "pods",
+            "allNamespaces": True
+        })
+        
+        if response and not response.get("error"):
+            return response
+        else:
+            return {"error": response.get("error", "Failed to retrieve pods")}
+            
+    except Exception as e:
+        return {"error": f"Exception while getting pods: {str(e)}"}
+
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     tools = list_mcp_tools(server_url)
@@ -382,6 +402,7 @@ User query: "{query}"
 Available tools: {json.dumps(tool_names, indent=2)}
 
 Rules:
+- If user says "show me all pods" or "ella pod" or "all pods" → use tool: kubectl_get, args: {{"resourceType": "pods", "allNamespaces": true}}
 - If user says "describe pod X [in ns Y]" → use tool: kubectl_describe, args: {{"name": "X", "namespace": "Y" or last_known_namespace or "default"}}
 - If user asks about "pending pods" → use custom_pending_pods_check
 - If about errors → kubectl_get with resourceType=events, allNamespaces=true
@@ -391,15 +412,22 @@ Rules:
 Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
+    
+    # FIXED: Handle "all pods" request properly
+    query_lower = query.lower()
+    if "all pods" in query_lower or "ella pod" in query_lower or "all namespace" in query_lower:
+        return {
+            "tool": "kubectl_get",
+            "args": {"resourceType": "pods", "allNamespaces": True},
+            "explanation": "User wants to see all pods across all namespaces"
+        }
+    
     if not GEMINI_AVAILABLE:
-        query_lower = query.lower()
         if "describe pod" in query_lower:
-            # Extract pod name and namespace
             parts = query.split()
             if len(parts) >= 3:
                 name = parts[2]
                 namespace = st.session_state.get("last_known_namespace", "default")
-                # Try to extract namespace from query
                 for i, part in enumerate(parts):
                     if part in ["in", "ns", "namespace", "-n"] and i+1 < len(parts):
                         namespace = parts[i+1]
@@ -413,13 +441,13 @@ Respond ONLY in strict JSON:
             return {
                 "tool": "custom_pending_pods_check",
                 "args": {},
-                "explanation": "User wants to see pending pods and reasons — checking all pods and describing pending ones."
+                "explanation": "User wants to see pending pods and reasons"
             }
         if "error" in query_lower or "issue" in query_lower or "problem" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "events", "allNamespaces": True},
-                "explanation": "User wants to see errors/issues in cluster - checking events"
+                "explanation": "User wants to see errors/issues in cluster"
             }
         if "pods" in query_lower and "efk" in query_lower:
             return {
@@ -450,7 +478,6 @@ Respond ONLY in strict JSON:
         if not parsed:
             parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
         
-        # Pass user query to sanitize_args for namespace extraction
         parsed["args"] = sanitize_args(parsed.get("args") or {}, query)
         return parsed
         
@@ -477,6 +504,7 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
             "- Respond in clear, natural, conversational English.\n"
+            "- If showing all pods, list them clearly with namespace and status.\n"
             "- If describing a pod, show Events section if available.\n"
             "- If pending pods → show name, namespace, reason, and fix advice.\n"
             "- If pod not found → say 'Pod not found' and suggest checking name/namespace.\n"
@@ -503,6 +531,31 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
 
     result = raw_response.get("result", {})
 
+    # FIXED: Handle all pods response properly
+    user_input_lower = user_input.lower()
+    if ("all pods" in user_input_lower or "ella pod" in user_input_lower or 
+        "all namespace" in user_input_lower) and isinstance(result, dict):
+        
+        if "items" in result:
+            pods = result["items"]
+            if isinstance(pods, list) and len(pods) > 0:
+                pod_list = []
+                for pod in pods:
+                    if isinstance(pod, dict):
+                        name = pod.get("metadata", {}).get("name", "unknown")
+                        namespace = pod.get("metadata", {}).get("namespace", "default")
+                        status = pod.get("status", {}).get("phase", "Unknown")
+                        pod_list.append(f"• `{name}` in `{namespace}` → **{status}**")
+                
+                if pod_list:
+                    return f"📋 Found {len(pod_list)} pods across all namespaces:\n\n" + "\n".join(pod_list)
+                else:
+                    return "No pods found in any namespace."
+            else:
+                return "No pods found in the cluster."
+        else:
+            return "Unable to retrieve pod information. Please try again."
+
     # Handle pending pods
     if isinstance(result, list) and len(result) > 0 and "name" in result[0] and "reason" in result[0]:
         count = len(result)
@@ -527,7 +580,7 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
             elif "Failed to pull image" in reason:
                 fix = "💡 **Fix**: Verify image name/tag and registry access. Does `docker pull` work?"
             elif "node affinity" in reason:
-                fix = "💡 **Fix**: Check node labels match pod’s `nodeAffinity` rules."
+                fix = "💡 **Fix**: Check node labels match pod's `nodeAffinity` rules."
             else:
                 fix = f"💡 **Fix**: Run `kubectl describe pod {name} -n {ns}` for detailed events."
 
@@ -537,12 +590,10 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
 
     # Handle kubectl_describe output
     if isinstance(result, str) and ("Events:" in result or "Name:" in result):
-        # Store namespace if found
         ns_match = re.search(r"Namespace:\s*(\S+)", result)
         if ns_match:
             st.session_state.last_known_namespace = ns_match.group(1)
 
-        # Return full describe but clean up
         if "not found" in result.lower():
             return "❌ Pod not found. Please verify the pod name and namespace."
 
@@ -583,7 +634,7 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                         phase = item.get("status", {}).get("phase", "Unknown")
                         pods.append(f"• `{name}` in `{ns}` → **{phase}**")
                         if phase == "Pending":
-                            st.session_state.last_known_namespace = ns  # Remember for next query
+                            st.session_state.last_known_namespace = ns
                 if pods:
                     return f"📋 Found {count} pod(s):\n" + "\n".join(pods)
                 else:
@@ -715,6 +766,7 @@ def main():
             "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
             "**For Kubernetes:**\n"
             "- \"List all namespaces\"\n"
+            "- \"Show all pods\" or \"Show me all pods\"\n"  # FIXED: Added clear instruction
             "- \"Show running pods\"\n"
             "- \"Get cluster nodes\"\n"
             "- \"Show all services\"\n"
@@ -725,6 +777,7 @@ def main():
             "- \"Show pending pods and reasons\"\n"
             "- \"Describe pod <name> in namespace <ns>\"\n\n"
             "**Examples:**\n"
+            "  • `show me all pods`\n"
             "  • `describe pod my-pod dev`\n"
             "  • `show pods in efk namespace`\n"
             "  • `kubectl describe pod my-pod -n prod`\n\n"
