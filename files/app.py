@@ -8,6 +8,7 @@ import google.generativeai as genai
 from typing import Optional, Dict, Any, List
 import re
 import yaml
+import subprocess
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -41,8 +42,9 @@ if "messages" not in st.session_state:
     st.session_state.last_known_cluster_size = None
     st.session_state.available_servers = SERVERS
     st.session_state.available_tools_cache = {}  # Cache for tools per server
+    st.session_state.helm_repos = {}  # Cache for Helm repositories
 
-# ---------------- HELPERS ----------------
+# ---------------- HELPER FUNCTIONS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
     """Direct call to MCP server with JSON-RPC payload"""
     payload = {
@@ -145,65 +147,6 @@ def get_tool_descriptions(server_url: str) -> str:
     
     return "\n\n".join(descriptions)
 
-def sanitize_args(args: dict):
-    """Fix arguments before sending to MCP tools."""
-    if not args:
-        return {}
-
-    fixed = args.copy()
-    
-    # Handle resource/resourceType naming
-    if "resource" in fixed and "resourceType" not in fixed:
-        fixed["resourceType"] = fixed.pop("resource")
-    
-    # Set default namespace for pods if not specified
-    if fixed.get("resourceType") in ["pods", "services", "deployments", "configmaps", "secrets"] and "namespace" not in fixed:
-        fixed["namespace"] = "default"
-    
-    # Handle "all namespaces" request
-    if fixed.get("namespace") == "all":
-        fixed["allNamespaces"] = True
-        fixed.pop("namespace", None)
-    
-    # Handle "all resources" request
-    if fixed.get("resourceType") == "all":
-        fixed["allResources"] = True
-        fixed.pop("resourceType", None)
-    
-    # Handle common Kubernetes resource types
-    resource_mappings = {
-        "ns": "namespaces",
-        "pod": "pods",
-        "node": "nodes",
-        "deploy": "deployments",
-        "svc": "services",
-        "cm": "configmaps",
-        "secret": "secrets",
-        "ingress": "ingresses",
-        "pv": "persistentvolumes",
-        "pvc": "persistentvolumeclaims",
-        "sa": "serviceaccounts",
-        "all": "all"
-    }
-    
-    if fixed.get("resourceType") in resource_mappings:
-        fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
-    
-    return fixed
-
-def _extract_json_from_text(text: str) -> Optional[dict]:
-    """Extract JSON object from free text."""
-    try:
-        # Find the first { and last }
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        if start != -1 and end != -1 and end > start:
-            json_str = text[start:end]
-            return json.loads(json_str)
-    except Exception:
-        pass
-    return None
-
 def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
     """Automatically detect which server to use based on query content."""
     query_lower = query.lower()
@@ -226,7 +169,8 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
             kubernetes_keywords = ["kubernetes", "k8s", "pod", "namespace", "deployment", 
                                  "service", "secret", "configmap", "node", "cluster", 
                                  "resource", "patch", "apply", "delete", "create", "get",
-                                 "loadbalancer", "clusterip", "nodeport", "ingress"]
+                                 "loadbalancer", "clusterip", "nodeport", "ingress",
+                                 "helm", "chart", "deploy", "install"]
             if any(keyword in query_lower for keyword in kubernetes_keywords) and ("kubernetes" in server_name or "k8s" in server_name):
                 return server
                 
@@ -248,254 +192,210 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
     # If no specific server detected, return the first available one
     return available_servers[0] if available_servers else None
 
-def get_all_cluster_resources(server_url: str):
-    """Get all resources in the cluster by querying multiple resource types."""
-    resource_types = [
-        "pods", "services", "deployments", "configmaps", 
-        "secrets", "namespaces", "nodes", "ingresses",
-        "persistentvolumes", "persistentvolumeclaims", "serviceaccounts"
-    ]
-    
-    all_resources = {}
-    
-    for resource_type in resource_types:
-        try:
-            response = call_tool(server_url, "kubectl_get", {
-                "resourceType": resource_type,
-                "allNamespaces": True
-            })
-            
-            if response and not response.get("error"):
-                result = response.get("result", {})
-                if isinstance(result, dict) and "items" in result:
-                    all_resources[resource_type] = result["items"]
-                else:
-                    all_resources[resource_type] = result
-            else:
-                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
-                
-            # Small delay to avoid overwhelming the server
-            time.sleep(0.1)
-            
-        except Exception as e:
-            all_resources[resource_type] = f"Exception: {str(e)}"
-    
-    return all_resources
+# ---------------- HELM FUNCTIONS (FLEXIBLE DEPLOYMENT) ----------------
+def execute_helm_command(command: str) -> Dict[str, Any]:
+    """Execute Helm command and return result."""
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=300)
+        
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "output": result.stdout,
+                "message": f"Helm command executed successfully: {command}"
+            }
+        else:
+            return {
+                "success": False,
+                "error": result.stderr,
+                "output": result.stdout,
+                "message": f"Helm command failed: {command}"
+            }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "Command timed out after 5 minutes",
+            "message": f"Helm command timed out: {command}"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Error executing Helm command: {command}"
+        }
 
-def execute_complex_operation(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
-    """Handle complex operations that might require multiple steps or specific tool combinations."""
+def deploy_helm_chart_flexible(chart_spec: str, release_name: str = None, namespace: str = "default", values: dict = None) -> Dict[str, Any]:
+    """
+    Flexible Helm chart deployment that can handle:
+    - Official charts (gitlab, vault, karpenter, etc.)
+    - Custom charts
+    - Different repository formats
+    """
+    
+    # Extract chart name and repository from the specification
+    chart_spec_lower = chart_spec.lower()
+    
+    # Default values
+    repo_url = None
+    chart_name = chart_spec
+    repo_name = f"repo-{int(time.time())}"  # Unique repo name
+    
+    # Map common official charts to their repositories
+    official_charts = {
+        "gitlab": "https://charts.gitlab.io/",
+        "vault": "https://helm.releases.hashicorp.com",
+        "karpenter": "oci://public.ecr.aws/karpenter",
+        "nginx": "https://kubernetes.github.io/ingress-nginx",
+        "cert-manager": "https://charts.jetstack.io",
+        "prometheus": "https://prometheus-community.github.io/helm-charts",
+        "grafana": "https://grafana.github.io/helm-charts",
+        "elasticsearch": "https://helm.elastic.co",
+        "redis": "https://charts.bitnami.com/bitnami",
+        "postgresql": "https://charts.bitnami.com/bitnami",
+        "mongodb": "https://charts.bitnami.com/bitnami",
+        "mysql": "https://charts.bitnami.com/bitnami",
+        "rabbitmq": "https://charts.bitnami.com/bitnami",
+        "kafka": "https://charts.bitnami.com/bitnami",
+        "jenkins": "https://charts.jenkins.io",
+        "argo-cd": "https://argoproj.github.io/argo-helm",
+        "istio": "https://istio-release.storage.googleapis.com/charts",
+        "linkerd": "https://helm.linkerd.io/stable",
+        "traefik": "https://helm.traefik.io/traefik"
+    }
+    
+    # Check if it's an official chart we know about
+    for known_chart, known_repo in official_charts.items():
+        if known_chart in chart_spec_lower:
+            repo_url = known_repo
+            chart_name = known_chart
+            repo_name = known_chart
+            break
+    
+    # If no specific repo found, try to extract from the spec
+    if "/" in chart_spec and "://" in chart_spec:
+        # Chart spec contains repository URL
+        parts = chart_spec.split("/")
+        repo_url = "/".join(parts[:-1])
+        chart_name = parts[-1]
+    elif "/" in chart_spec:
+        # Probably a repo/chart format
+        parts = chart_spec.split("/")
+        if len(parts) == 2:
+            repo_name = parts[0]
+            chart_name = parts[1]
+            # Try to find repo URL from cache
+            repo_url = st.session_state.helm_repos.get(repo_name)
+    
+    # Generate release name if not provided
+    if not release_name:
+        release_name = f"{chart_name}-{int(time.time())}"
+    
+    # Prepare values file if provided
+    values_file = None
+    if values:
+        values_file = f"/tmp/values-{release_name}.yaml"
+        with open(values_file, 'w') as f:
+            yaml.dump(values, f)
+    
+    commands = []
+    
+    # Add repository if URL is known
+    if repo_url:
+        commands.append(f"helm repo add {repo_name} {repo_url}")
+        commands.append("helm repo update")
+    
+    # Install chart
+    install_cmd = f"helm install {release_name} {repo_name}/{chart_name} --namespace {namespace} --create-namespace"
+    if values_file:
+        install_cmd += f" -f {values_file}"
+    
+    commands.append(install_cmd)
+    
+    # Execute commands
+    results = []
+    for cmd in commands:
+        result = execute_helm_command(cmd)
+        results.append(result)
+        if not result["success"]:
+            # Stop if any command fails
+            return result
+    
+    return {
+        "success": True,
+        "results": results,
+        "message": f"Successfully deployed {chart_name} as {release_name} in namespace {namespace}",
+        "release_name": release_name,
+        "chart_name": chart_name
+    }
+
+def handle_any_deployment(user_query: str) -> Dict[str, Any]:
+    """Handle deployment of any tool/chart mentioned in the query."""
     query_lower = user_query.lower()
     
-    # Service type change operation
-    if any(keyword in query_lower for keyword in ["loadbalancer", "clusterip", "nodeport", "change service", "service type"]):
-        return handle_service_type_change(server_url, user_query)
+    # Extract deployment target from query
+    deployment_target = None
+    release_name = None
+    namespace = "default"
     
-    # Resource creation operation
-    if any(keyword in query_lower for keyword in ["create", "apply", "new", "add"]):
-        return handle_resource_creation(server_url, user_query, available_tools)
+    # Common patterns for deployment queries
+    patterns = [
+        r"deploy\s+(?:the\s+)?(?:official\s+)?(\w+)(?:\s+helm\s+chart)?",
+        r"install\s+(?:the\s+)?(?:official\s+)?(\w+)(?:\s+helm\s+chart)?",
+        r"deploy\s+(\w+)\s+in\s+cluster",
+        r"install\s+(\w+)\s+in\s+cluster",
+        r"add\s+(\w+)\s+to\s+cluster",
+        r"setup\s+(\w+)\s+in\s+cluster"
+    ]
     
-    # Resource modification operation
-    if any(keyword in query_lower for keyword in ["patch", "update", "modify", "edit", "change"]):
-        return handle_resource_modification(server_url, user_query, available_tools)
+    for pattern in patterns:
+        match = re.search(pattern, query_lower, re.IGNORECASE)
+        if match:
+            deployment_target = match.group(1)
+            break
     
-    # Resource deletion operation
-    if any(keyword in query_lower for keyword in ["delete", "remove", "destroy"]):
-        return handle_resource_deletion(server_url, user_query, available_tools)
+    # If no pattern matched, try to extract the first meaningful word after deploy/install
+    if not deployment_target:
+        words = user_query.split()
+        for i, word in enumerate(words):
+            if word.lower() in ["deploy", "install", "setup", "add"] and i + 1 < len(words):
+                deployment_target = words[i + 1]
+                break
     
-    return {"tool": None, "args": None, "explanation": "Complex operation detection failed"}
-
-def handle_service_type_change(server_url: str, user_query: str) -> Dict[str, Any]:
-    """Handle service type change operations."""
-    # Extract service name and namespace from query
-    service_name = extract_entity_name(user_query, "service")
-    namespace = extract_namespace(user_query) or "default"
-    target_type = "ClusterIP"  # Default target type
+    # Extract namespace if specified
+    namespace_match = re.search(r"namespace\s+(\w+)", query_lower)
+    if namespace_match:
+        namespace = namespace_match.group(1)
     
-    if "loadbalancer" in user_query.lower():
-        target_type = "LoadBalancer"
-    elif "nodeport" in user_query.lower():
-        target_type = "NodePort"
+    # Extract release name if specified
+    release_match = re.search(r"(?:as|named)\s+(\w+)", query_lower)
+    if release_match:
+        release_name = release_match.group(1)
     
-    if service_name:
+    if deployment_target:
         return {
-            "tool": "kubectl_patch",
-            "args": {
-                "resourceType": "services",
-                "name": service_name,
-                "namespace": namespace,
-                "patch": json.dumps({"spec": {"type": target_type}}),
-                "type": "strategic"
-            },
-            "explanation": f"Changing service {service_name} in namespace {namespace} to {target_type}"
+            "type": "helm_deploy",
+            "target": deployment_target,
+            "release_name": release_name,
+            "namespace": namespace,
+            "explanation": f"Deploying {deployment_target} using Helm"
         }
     
-    return {"tool": None, "args": None, "explanation": "Could not extract service name from query"}
-
-def handle_resource_creation(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
-    """Handle resource creation operations."""
-    if "kubectl_apply" in available_tools or "kubectl_create" in available_tools:
-        tool_name = "kubectl_apply" if "kubectl_apply" in available_tools else "kubectl_create"
-        
-        # Try to extract YAML/JSON content from query or generate basic template
-        yaml_content = extract_yaml_content(user_query)
-        if not yaml_content:
-            yaml_content = generate_basic_template(user_query)
-        
-        if yaml_content:
-            return {
-                "tool": tool_name,
-                "args": {
-                    "filename": "generated-resource.yaml",
-                    "yamlContent": yaml_content
-                },
-                "explanation": f"Creating resource using {tool_name}"
-            }
-    
-    return {"tool": None, "args": None, "explanation": "Resource creation not supported with available tools"}
-
-def handle_resource_modification(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
-    """Handle resource modification operations."""
-    if "kubectl_patch" in available_tools:
-        resource_type = extract_resource_type(user_query)
-        resource_name = extract_entity_name(user_query, resource_type or "resource")
-        namespace = extract_namespace(user_query) or "default"
-        
-        if resource_type and resource_name:
-            return {
-                "tool": "kubectl_patch",
-                "args": {
-                    "resourceType": resource_type,
-                    "name": resource_name,
-                    "namespace": namespace,
-                    "patch": '{"spec": {"replicas": 1}}',  # Default patch
-                    "type": "strategic"
-                },
-                "explanation": f"Patching {resource_type} {resource_name} in namespace {namespace}"
-            }
-    
-    return {"tool": None, "args": None, "explanation": "Resource modification not supported with available tools"}
-
-def handle_resource_deletion(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
-    """Handle resource deletion operations."""
-    if "kubectl_delete" in available_tools:
-        resource_type = extract_resource_type(user_query)
-        resource_name = extract_entity_name(user_query, resource_type or "resource")
-        namespace = extract_namespace(user_query) or "default"
-        
-        if resource_type and resource_name:
-            return {
-                "tool": "kubectl_delete",
-                "args": {
-                    "resourceType": resource_type,
-                    "name": resource_name,
-                    "namespace": namespace
-                },
-                "explanation": f"Deleting {resource_type} {resource_name} from namespace {namespace}"
-            }
-    
-    return {"tool": None, "args": None, "explanation": "Resource deletion not supported with available tools"}
-
-def extract_entity_name(query: str, entity_type: str) -> Optional[str]:
-    """Extract entity name from query."""
-    patterns = [
-        rf"{entity_type}\s+(\w+)",
-        rf"(\w+)\s+{entity_type}",
-        rf"{entity_type}[^\w]*([\w-]+)",
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def extract_resource_type(query: str) -> Optional[str]:
-    """Extract resource type from query."""
-    resource_types = ["pod", "service", "deployment", "configmap", "secret", "namespace", "node", "ingress"]
-    
-    for resource_type in resource_types:
-        if resource_type in query.lower():
-            return resource_type + "s"  # Pluralize
-    
-    return None
-
-def extract_namespace(query: str) -> Optional[str]:
-    """Extract namespace from query."""
-    patterns = [
-        r"namespace\s+(\w+)",
-        r"in\s+(\w+)\s+namespace",
-        r"namespace[^\w]*([\w-]+)",
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def extract_yaml_content(query: str) -> Optional[str]:
-    """Extract YAML content from query."""
-    # Look for YAML blocks in the query
-    yaml_pattern = r"```(?:yaml)?\s*(.*?)\s*```"
-    match = re.search(yaml_pattern, query, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1)
-    
-    return None
-
-def generate_basic_template(query: str) -> Optional[str]:
-    """Generate a basic Kubernetes template based on query content."""
-    query_lower = query.lower()
-    
-    if "deployment" in query_lower:
-        return """apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: example-deployment
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: example
-  template:
-    metadata:
-      labels:
-        app: example
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:latest
-        ports:
-        - containerPort: 80"""
-    
-    elif "service" in query_lower:
-        return """apiVersion: v1
-kind: Service
-metadata:
-  name: example-service
-spec:
-  selector:
-    app: example
-  ports:
-  - port: 80
-    targetPort: 80
-  type: ClusterIP"""
-    
-    return None
+    return {
+        "type": "unknown",
+        "explanation": "Could not determine what to deploy from the query"
+    }
 
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
-    """Use Gemini to map user query -> MCP tool + arguments."""
+    """Use Gemini to map user query -> MCP tool + arguments or deployment action."""
     tools = list_mcp_tools(server_url)
     tool_names = [t["name"] for t in tools if "name" in t]
     tool_descriptions = get_tool_descriptions(server_url)
 
-    # First, try complex operation detection
-    complex_result = execute_complex_operation(server_url, query, tool_names)
-    if complex_result.get("tool"):
-        return complex_result
+    # First, check if this is a deployment request
+    deployment_result = handle_any_deployment(query)
+    if deployment_result["type"] == "helm_deploy":
+        return deployment_result
 
     # Inject context from session state if available
     context_notes = ""
@@ -505,7 +405,7 @@ def ask_gemini_for_tool_decision(query: str, server_url: str):
         context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
 
     instruction = f"""
-You are an AI agent that maps user queries to MCP tools for Kubernetes operations.
+You are an AI agent that maps user queries to MCP tools for Kubernetes operations or deployment actions.
 User query: "{query}"
 {context_notes}
 
@@ -513,54 +413,43 @@ Available tools and their descriptions:
 {tool_descriptions}
 
 Rules:
-- Choose the most appropriate tool for the user's request.
+- If the user wants to deploy/install any tool, chart, or application, respond with deployment action.
 - For viewing resources, use kubectl_get.
 - For modifying resources, use kubectl_patch or kubectl_edit.
 - For creating resources, use kubectl_apply or kubectl_create.
 - For deleting resources, use kubectl_delete.
 - Extract resource names, types, and namespaces from the query.
-- Set appropriate arguments based on the query.
-- If unsure, set tool=null and args=null.
 
-Respond ONLY in strict JSON format:
-{{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
+For deployment requests, respond with:
+{{"type": "helm_deploy", "target": "chart-name", "release_name": "optional-name", "namespace": "optional-namespace", "explanation": "Short explanation"}}
+
+For tool requests, respond with:
+{{"type": "mcp_tool", "tool": "tool_name", "args": {{arguments}}, "explanation": "Short explanation"}}
+
+If unsure, respond with:
+{{"type": "unknown", "explanation": "Need more information"}}
 """
+    
     if not GEMINI_AVAILABLE:
-        # Enhanced fallback logic
+        # Fallback logic
         query_lower = query.lower()
+        
+        # Deployment detection fallback
+        if any(keyword in query_lower for keyword in ["deploy", "install", "setup", "add"]):
+            deployment_result = handle_any_deployment(query)
+            if deployment_result["type"] == "helm_deploy":
+                return deployment_result
         
         # View operations
         if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
             return {
+                "type": "mcp_tool",
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
                 "explanation": "User wants to see all resources in cluster"
             }
-        elif any(resource in query_lower for resource in ["pods", "services", "deployments", "secrets", "configmaps", "nodes", "namespaces"]):
-            for resource in ["pods", "services", "deployments", "secrets", "configmaps", "nodes", "namespaces"]:
-                if resource in query_lower:
-                    return {
-                        "tool": "kubectl_get",
-                        "args": {"resourceType": resource, "allNamespaces": True},
-                        "explanation": f"User wants to see all {resource}"
-                    }
         
-        # Modification operations
-        elif any(keyword in query_lower for keyword in ["change", "modify", "update", "patch"]):
-            resource_type = extract_resource_type(query)
-            resource_name = extract_entity_name(query, resource_type or "resource")
-            if resource_type and resource_name:
-                return {
-                    "tool": "kubectl_patch",
-                    "args": {
-                        "resourceType": resource_type,
-                        "name": resource_name,
-                        "namespace": extract_namespace(query) or "default"
-                    },
-                    "explanation": f"Modifying {resource_type} {resource_name}"
-                }
-        
-        return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
+        return {"type": "unknown", "explanation": "Need more information about what you want to do"}
     
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -572,19 +461,26 @@ Respond ONLY in strict JSON format:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            parsed = _extract_json_from_text(text)
+            # Try to extract JSON from text
+            try:
+                start = text.find('{')
+                end = text.rfind('}') + 1
+                if start != -1 and end != -1 and end > start:
+                    json_str = text[start:end]
+                    parsed = json.loads(json_str)
+            except:
+                pass
         
         if not parsed:
-            parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+            parsed = {"type": "unknown", "explanation": f"Invalid response: {text}"}
         
-        parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
         
     except Exception as e:
-        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+        return {"type": "unknown", "explanation": f"Gemini error: {str(e)}"}
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Use Gemini to convert raw MCP response into human-friendly answer."""
+    """Use Gemini to convert raw response into human-friendly answer."""
     if not GEMINI_AVAILABLE:
         return generate_fallback_answer(user_input, raw_response)
 
@@ -602,20 +498,15 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
             "- Respond in clear, natural, conversational English.\n"
+            "- If it's a deployment result, explain what was deployed and any next steps.\n"
             "- If it's a list, format with bullet points.\n"
-            "- If it's status, explain health and issues clearly.\n"
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
-            "- If cluster name or size was inferred, mention that explicitly.\n"
-            "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
             "- NEVER show JSON, code, or internal errors to user unless asked.\n"
             "- Be helpful, friendly, and precise."
         )
         
         resp = model.generate_content(prompt)
         answer = getattr(resp, "text", str(resp)).strip()
-
-        # Extract and store cluster info for future context
-        extract_and_store_cluster_info(user_input, answer)
 
         return answer
 
@@ -625,96 +516,26 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
 def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     """Generate human-friendly answer without Gemini."""
     
-    # Handle service type change responses
-    if "service" in user_input.lower() and ("change" in user_input.lower() or "modify" in user_input.lower()):
-        if raw_response.get("success"):
-            return raw_response.get("message", "Service type changed successfully!")
-        elif raw_response.get("error"):
-            return f"Failed to change service type: {raw_response['error']}"
+    if "success" in raw_response:
+        if raw_response["success"]:
+            if "release_name" in raw_response:
+                return f"✅ Successfully deployed {raw_response.get('chart_name', 'the application')} as '{raw_response['release_name']}'. The deployment is now running in your cluster."
+            return "✅ Operation completed successfully."
+        else:
+            error_msg = raw_response.get("error", "Unknown error occurred")
+            return f"❌ Deployment failed: {error_msg}\n\nPlease check the chart name and repository URL, and ensure you have proper cluster access."
     
     if "error" in raw_response:
         error_msg = raw_response["error"]
-        if "cluster" in user_input.lower():
-            return "I couldn't retrieve the cluster information right now. Please check if the MCP server is running and accessible."
-        return f"Sorry, I encountered an issue: {error_msg}"
+        return f"❌ Operation failed: {error_msg}"
     
     result = raw_response.get("result", {})
     
-    # Handle different response formats
-    if isinstance(result, dict):
-        # Kubernetes-style responses with items
-        if "items" in result:
-            items = result["items"]
-            count = len(items)
-            
-            if "node" in user_input.lower() or "cluster size" in user_input.lower():
-                if count == 1:
-                    node_name = items[0].get("metadata", {}).get("name", "unknown")
-                    return f"This is a single-node cluster. The node is named: {node_name}"
-                else:
-                    return f"The cluster has {count} nodes."
-            
-            if "namespace" in user_input.lower():
-                namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
-                if namespaces:
-                    return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
-                else:
-                    return "No namespaces found."
-            
-            if "pod" in user_input.lower():
-                pods = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
-                if pods:
-                    return f"Found {count} pods:\n" + "\n".join([f"• {pod}" for pod in pods])
-                else:
-                    return "No pods found."
-            
-            if "secret" in user_input.lower():
-                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
-                if secrets:
-                    return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
-                else:
-                    return "No secrets found."
-        
-        # Success messages for operations
-        if "metadata" in result and "name" in result.get("metadata", {}):
-            resource_name = result["metadata"]["name"]
-            if "delete" in user_input.lower():
-                return f"Successfully deleted {resource_name}"
-            elif "create" in user_input.lower() or "apply" in user_input.lower():
-                return f"Successfully created {resource_name}"
-            elif "patch" in user_input.lower() or "update" in user_input.lower():
-                return f"Successfully updated {resource_name}"
+    if isinstance(result, dict) and "items" in result:
+        count = len(result["items"])
+        return f"Found {count} resources matching your query."
     
-    # Generic success message
-    if result and not isinstance(result, str):
-        return "Operation completed successfully."
-    
-    return "Operation completed successfully, but no data was returned."
-
-def extract_and_store_cluster_info(user_input: str, answer: str):
-    """Extract cluster name/size from Gemini answer and store in session."""
-    try:
-        # Extract cluster name
-        if "cluster name" in user_input.lower():
-            patterns = [
-                r"cluster[^\w]*([\w-]+)",
-                r"name[^\w][:\-]?[^\w]([\w-]+)",
-                r"\*([\w-]+)\*",  # bolded name
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, answer, re.IGNORECASE)
-                if match:
-                    cluster_name = match.group(1).strip()
-                    st.session_state.last_known_cluster_name = cluster_name
-                    break
-
-        # Extract cluster size
-        if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
-            numbers = re.findall(r'\b\d+\b', answer)
-            if numbers:
-                st.session_state.last_known_cluster_size = int(numbers[0])
-    except Exception:
-        pass  # silent fail
+    return "Operation completed successfully."
 
 # ---------------- STREAMLIT APP ----------------
 def main():
@@ -780,7 +601,7 @@ def main():
     with st.chat_message("assistant"):
         st.markdown(server_info)
     
-    # Use Gemini to determine the best tool and arguments
+    # Use Gemini to determine the best action
     with st.spinner("🤔 Analyzing your request..."):
         decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
     
@@ -789,57 +610,94 @@ def main():
     with st.chat_message("assistant"):
         st.markdown(f"💡 {explanation}")
     
-    tool_name = decision.get("tool")
-    tool_args = decision.get("args") or {}
+    action_type = decision.get("type", "unknown")
     
-    # Execute tool if one was selected
-    if tool_name:
-        with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}`...")
+    # Handle different action types
+    if action_type == "helm_deploy":
+        # Deploy any Helm chart
+        target = decision.get("target")
+        release_name = decision.get("release_name")
+        namespace = decision.get("namespace", "default")
         
-        # Special handling for "all resources" request
-        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
-            with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
-                all_resources = get_all_cluster_resources(selected_server["url"])
-                resp = {"result": all_resources}
+        if target:
+            with st.chat_message("assistant"):
+                st.markdown(f"🚀 Deploying **{target}** in namespace **{namespace}**...")
+            
+            with st.spinner(f"🔄 Deploying {target} (this may take a few minutes)..."):
+                result = deploy_helm_chart_flexible(target, release_name, namespace)
+            
+            # Generate human-readable response
+            final_answer = ask_gemini_answer(user_prompt, result)
+            
+            # Add to chat history
+            st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            with st.chat_message("assistant"):
+                st.markdown(final_answer)
         else:
-            # Call the tool normally
+            error_msg = "I couldn't determine what you want to deploy. Please be more specific (e.g., 'deploy gitlab', 'install nginx', 'setup prometheus')."
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            with st.chat_message("assistant"):
+                st.error(error_msg)
+    
+    elif action_type == "mcp_tool":
+        # Use MCP tool
+        tool_name = decision.get("tool")
+        tool_args = decision.get("args") or {}
+        
+        if tool_name:
+            with st.chat_message("assistant"):
+                st.markdown(f"🔧 Executing `{tool_name}`...")
+            
             with st.spinner("🔄 Processing your request..."):
                 resp = call_tool(selected_server["url"], tool_name, tool_args)
-        
-        # Generate human-readable response
-        with st.spinner("📝 Formatting response..."):
+            
+            # Generate human-readable response
             final_answer = ask_gemini_answer(user_prompt, resp)
-        
-        # Add to chat history
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
-        with st.chat_message("assistant"):
-            st.markdown(final_answer)
+            
+            # Add to chat history
+            st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            with st.chat_message("assistant"):
+                st.markdown(final_answer)
+        else:
+            error_msg = "I couldn't determine which tool to use for your request."
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            with st.chat_message("assistant"):
+                st.error(error_msg)
     
     else:
-        # No tool selected - provide helpful suggestions with available tools
-        available_tools = list_mcp_tools(selected_server["url"])
-        tool_names = [t.get("name", "") for t in available_tools if t.get("name")]
-        
-        helpful_response = (
-            f"I couldn't find a specific tool to answer your question. Here are the available tools and what you can try:\n\n"
-            f"**Available Tools:** {', '.join(tool_names)}\n\n"
-            "**Common Kubernetes Operations:**\n"
-            "- \"List all pods in all namespaces\"\n"
-            "- \"Show all services in the cluster\"\n"
-            "- \"Get cluster nodes and status\"\n"
-            "- \"Change service myservice from LoadBalancer to ClusterIP\"\n"
-            "- \"Create a new deployment from YAML\"\n"
-            "- \"Delete pod my-pod in default namespace\"\n"
-            "- \"Patch deployment my-deployment to set replicas to 3\"\n"
-            "- \"Show all resources in the cluster\"\n\n"
-            "**Examples:**\n"
-            "- `kubectl get pods --all-namespaces` → \"show me all pods\"\n"
-            "- `kubectl patch service myservice --type='merge' -p='{\"spec\":{\"type\":\"ClusterIP\"}}'` → \"change service myservice to clusterip\"\n"
-            "- `kubectl apply -f deployment.yaml` → \"create this deployment\" (provide YAML)\n\n"
-            "Try being more specific about what you'd like to do!"
-        )
+        # Unknown action - provide helpful guidance
+        helpful_response = """
+**I can help you with various Kubernetes operations:**
+
+**🚀 Deployment Commands:**
+- "Deploy GitLab in my cluster"
+- "Install Vault Helm chart"  
+- "Setup Prometheus monitoring"
+- "Add nginx ingress controller"
+- "Install cert-manager for TLS certificates"
+- "Deploy Redis for caching"
+- "Setup Jenkins CI/CD"
+
+**🔧 Kubernetes Operations:**
+- "Show all pods in all namespaces"
+- "Get cluster nodes and status"
+- "List all services"
+- "Check cluster resources"
+- "Create a new deployment from YAML"
+
+**📊 Monitoring & Management:**
+- "Show cluster health"
+- "Check resource usage"
+- "List all running applications"
+
+**💡 Examples:**
+- `deploy gitlab` - Installs GitLab using official Helm chart
+- `install nginx` - Sets up nginx ingress controller  
+- `setup prometheus` - Deploys monitoring stack
+- `show all pods` - Lists all pods in cluster
+
+What would you like to do today?
+"""
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
         with st.chat_message("assistant"):
