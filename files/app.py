@@ -5,10 +5,8 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import re
-import yaml
-import subprocess
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -41,10 +39,8 @@ if "messages" not in st.session_state:
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
     st.session_state.available_servers = SERVERS
-    st.session_state.available_tools_cache = {}  # Cache for tools per server
-    st.session_state.helm_repos = {}  # Cache for Helm repositories
 
-# ---------------- HELPER FUNCTIONS ----------------
+# ---------------- HELPERS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
     """Direct call to MCP server with JSON-RPC payload"""
     payload = {
@@ -88,30 +84,24 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
-def list_mcp_tools(server_url: str) -> List[Dict[str, Any]]:
-    """Fetch available MCP tools for a specific server with caching."""
-    if server_url in st.session_state.available_tools_cache:
-        return st.session_state.available_tools_cache[server_url]
-    
+def list_mcp_tools(server_url: str):
+    """Fetch available MCP tools for a specific server."""
     resp = direct_mcp_call(server_url, "tools/list")
-    tools = []
-    
     if not isinstance(resp, dict):
-        st.session_state.available_tools_cache[server_url] = tools
-        return tools
+        return []
     
     # Handle different response formats
     result = resp.get("result", {})
     if isinstance(result, dict):
-        tools = result.get("tools", [])
-    elif isinstance(result, list):
-        tools = result
-    elif "tools" in resp:
-        tools = resp["tools"]
+        return result.get("tools", [])
+    if isinstance(result, list):
+        return result
     
-    # Cache the tools
-    st.session_state.available_tools_cache[server_url] = tools
-    return tools
+    # Check if tools are at the root level
+    if "tools" in resp:
+        return resp["tools"]
+    
+    return []
 
 def call_tool(server_url: str, name: str, arguments: dict):
     """Execute MCP tool by name with arguments."""
@@ -123,29 +113,60 @@ def call_tool(server_url: str, name: str, arguments: dict):
         "arguments": arguments
     })
 
-def get_tool_descriptions(server_url: str) -> str:
-    """Get detailed descriptions of all available tools."""
-    tools = list_mcp_tools(server_url)
-    descriptions = []
+def sanitize_args(args: dict):
+    """Fix arguments before sending to MCP tools."""
+    if not args:
+        return {}
+
+    fixed = args.copy()
     
-    for tool in tools:
-        name = tool.get("name", "")
-        description = tool.get("description", "No description available")
-        input_schema = tool.get("inputSchema", {})
-        
-        # Extract parameter information
-        params = input_schema.get("properties", {})
-        param_desc = []
-        for param_name, param_info in params.items():
-            param_type = param_info.get("type", "unknown")
-            param_desc.append(f"  - {param_name} ({param_type}): {param_info.get('description', 'No description')}")
-        
-        tool_desc = f"{name}: {description}"
-        if param_desc:
-            tool_desc += f"\nParameters:\n" + "\n".join(param_desc)
-        descriptions.append(tool_desc)
+    # Handle resource/resourceType naming
+    if "resource" in fixed and "resourceType" not in fixed:
+        fixed["resourceType"] = fixed.pop("resource")
     
-    return "\n\n".join(descriptions)
+    # Set default namespace for pods if not specified
+    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
+        fixed["namespace"] = "default"
+    
+    # Handle "all namespaces" request
+    if fixed.get("namespace") == "all":
+        fixed["allNamespaces"] = True
+        fixed.pop("namespace", None)
+    
+    # Handle "all resources" request
+    if fixed.get("resourceType") == "all":
+        fixed["allResources"] = True
+        fixed.pop("resourceType", None)
+    
+    # Handle common Kubernetes resource types
+    resource_mappings = {
+        "ns": "namespaces",
+        "pod": "pods",
+        "node": "nodes",
+        "deploy": "deployments",
+        "svc": "services",
+        "cm": "configmaps",
+        "secret": "secrets",
+        "all": "all"
+    }
+    
+    if fixed.get("resourceType") in resource_mappings:
+        fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
+    
+    return fixed
+
+def _extract_json_from_text(text: str) -> Optional[dict]:
+    """Extract JSON object from free text."""
+    try:
+        # Find the first { and last }
+        start = text.find('{')
+        end = text.rfind('}') + 1
+        if start != -1 and end != -1 and end > start:
+            json_str = text[start:end]
+            return json.loads(json_str)
+    except Exception:
+        pass
+    return None
 
 def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
     """Automatically detect which server to use based on query content."""
@@ -166,12 +187,13 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
             server_name = server["name"].lower()
             
             # Kubernetes queries
-            kubernetes_keywords = ["kubernetes", "k8s", "pod", "namespace", "deployment", 
-                                 "service", "secret", "configmap", "node", "cluster", 
-                                 "resource", "patch", "apply", "delete", "create", "get",
-                                 "loadbalancer", "clusterip", "nodeport", "ingress",
-                                 "helm", "chart", "deploy", "install"]
-            if any(keyword in query_lower for keyword in kubernetes_keywords) and ("kubernetes" in server_name or "k8s" in server_name):
+            if (("kubernetes" in query_lower or "k8s" in query_lower or 
+                 "pod" in query_lower or "namespace" in query_lower or
+                 "deployment" in query_lower or "service" in query_lower or
+                 "secret" in query_lower or "configmap" in query_lower or
+                 "node" in query_lower or "cluster" in query_lower or
+                 "resource" in query_lower) and 
+                ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
             # Jenkins queries
@@ -192,210 +214,44 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
     # If no specific server detected, return the first available one
     return available_servers[0] if available_servers else None
 
-# ---------------- HELM FUNCTIONS (FLEXIBLE DEPLOYMENT) ----------------
-def execute_helm_command(command: str) -> Dict[str, Any]:
-    """Execute Helm command and return result."""
-    try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=300)
-        
-        if result.returncode == 0:
-            return {
-                "success": True,
-                "output": result.stdout,
-                "message": f"Helm command executed successfully: {command}"
-            }
-        else:
-            return {
-                "success": False,
-                "error": result.stderr,
-                "output": result.stdout,
-                "message": f"Helm command failed: {command}"
-            }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": "Command timed out after 5 minutes",
-            "message": f"Helm command timed out: {command}"
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": f"Error executing Helm command: {command}"
-        }
-
-def deploy_helm_chart_flexible(chart_spec: str, release_name: str = None, namespace: str = "default", values: dict = None) -> Dict[str, Any]:
-    """
-    Flexible Helm chart deployment that can handle:
-    - Official charts (gitlab, vault, karpenter, etc.)
-    - Custom charts
-    - Different repository formats
-    """
-    
-    # Extract chart name and repository from the specification
-    chart_spec_lower = chart_spec.lower()
-    
-    # Default values
-    repo_url = None
-    chart_name = chart_spec
-    repo_name = f"repo-{int(time.time())}"  # Unique repo name
-    
-    # Map common official charts to their repositories
-    official_charts = {
-        "gitlab": "https://charts.gitlab.io/",
-        "vault": "https://helm.releases.hashicorp.com",
-        "karpenter": "oci://public.ecr.aws/karpenter",
-        "nginx": "https://kubernetes.github.io/ingress-nginx",
-        "cert-manager": "https://charts.jetstack.io",
-        "prometheus": "https://prometheus-community.github.io/helm-charts",
-        "grafana": "https://grafana.github.io/helm-charts",
-        "elasticsearch": "https://helm.elastic.co",
-        "redis": "https://charts.bitnami.com/bitnami",
-        "postgresql": "https://charts.bitnami.com/bitnami",
-        "mongodb": "https://charts.bitnami.com/bitnami",
-        "mysql": "https://charts.bitnami.com/bitnami",
-        "rabbitmq": "https://charts.bitnami.com/bitnami",
-        "kafka": "https://charts.bitnami.com/bitnami",
-        "jenkins": "https://charts.jenkins.io",
-        "argo-cd": "https://argoproj.github.io/argo-helm",
-        "istio": "https://istio-release.storage.googleapis.com/charts",
-        "linkerd": "https://helm.linkerd.io/stable",
-        "traefik": "https://helm.traefik.io/traefik"
-    }
-    
-    # Check if it's an official chart we know about
-    for known_chart, known_repo in official_charts.items():
-        if known_chart in chart_spec_lower:
-            repo_url = known_repo
-            chart_name = known_chart
-            repo_name = known_chart
-            break
-    
-    # If no specific repo found, try to extract from the spec
-    if "/" in chart_spec and "://" in chart_spec:
-        # Chart spec contains repository URL
-        parts = chart_spec.split("/")
-        repo_url = "/".join(parts[:-1])
-        chart_name = parts[-1]
-    elif "/" in chart_spec:
-        # Probably a repo/chart format
-        parts = chart_spec.split("/")
-        if len(parts) == 2:
-            repo_name = parts[0]
-            chart_name = parts[1]
-            # Try to find repo URL from cache
-            repo_url = st.session_state.helm_repos.get(repo_name)
-    
-    # Generate release name if not provided
-    if not release_name:
-        release_name = f"{chart_name}-{int(time.time())}"
-    
-    # Prepare values file if provided
-    values_file = None
-    if values:
-        values_file = f"/tmp/values-{release_name}.yaml"
-        with open(values_file, 'w') as f:
-            yaml.dump(values, f)
-    
-    commands = []
-    
-    # Add repository if URL is known
-    if repo_url:
-        commands.append(f"helm repo add {repo_name} {repo_url}")
-        commands.append("helm repo update")
-    
-    # Install chart
-    install_cmd = f"helm install {release_name} {repo_name}/{chart_name} --namespace {namespace} --create-namespace"
-    if values_file:
-        install_cmd += f" -f {values_file}"
-    
-    commands.append(install_cmd)
-    
-    # Execute commands
-    results = []
-    for cmd in commands:
-        result = execute_helm_command(cmd)
-        results.append(result)
-        if not result["success"]:
-            # Stop if any command fails
-            return result
-    
-    return {
-        "success": True,
-        "results": results,
-        "message": f"Successfully deployed {chart_name} as {release_name} in namespace {namespace}",
-        "release_name": release_name,
-        "chart_name": chart_name
-    }
-
-def handle_any_deployment(user_query: str) -> Dict[str, Any]:
-    """Handle deployment of any tool/chart mentioned in the query."""
-    query_lower = user_query.lower()
-    
-    # Extract deployment target from query
-    deployment_target = None
-    release_name = None
-    namespace = "default"
-    
-    # Common patterns for deployment queries
-    patterns = [
-        r"deploy\s+(?:the\s+)?(?:official\s+)?(\w+)(?:\s+helm\s+chart)?",
-        r"install\s+(?:the\s+)?(?:official\s+)?(\w+)(?:\s+helm\s+chart)?",
-        r"deploy\s+(\w+)\s+in\s+cluster",
-        r"install\s+(\w+)\s+in\s+cluster",
-        r"add\s+(\w+)\s+to\s+cluster",
-        r"setup\s+(\w+)\s+in\s+cluster"
+def get_all_cluster_resources(server_url: str):
+    """Get all resources in the cluster by querying multiple resource types."""
+    resource_types = [
+        "pods", "services", "deployments", "configmaps", 
+        "secrets", "namespaces", "nodes"
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, query_lower, re.IGNORECASE)
-        if match:
-            deployment_target = match.group(1)
-            break
+    all_resources = {}
     
-    # If no pattern matched, try to extract the first meaningful word after deploy/install
-    if not deployment_target:
-        words = user_query.split()
-        for i, word in enumerate(words):
-            if word.lower() in ["deploy", "install", "setup", "add"] and i + 1 < len(words):
-                deployment_target = words[i + 1]
-                break
+    for resource_type in resource_types:
+        try:
+            response = call_tool(server_url, "kubectl_get", {
+                "resourceType": resource_type,
+                "allNamespaces": True
+            })
+            
+            if response and not response.get("error"):
+                result = response.get("result", {})
+                if isinstance(result, dict) and "items" in result:
+                    all_resources[resource_type] = result["items"]
+                else:
+                    all_resources[resource_type] = result
+            else:
+                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
+                
+            # Small delay to avoid overwhelming the server
+            time.sleep(0.1)
+            
+        except Exception as e:
+            all_resources[resource_type] = f"Exception: {str(e)}"
     
-    # Extract namespace if specified
-    namespace_match = re.search(r"namespace\s+(\w+)", query_lower)
-    if namespace_match:
-        namespace = namespace_match.group(1)
-    
-    # Extract release name if specified
-    release_match = re.search(r"(?:as|named)\s+(\w+)", query_lower)
-    if release_match:
-        release_name = release_match.group(1)
-    
-    if deployment_target:
-        return {
-            "type": "helm_deploy",
-            "target": deployment_target,
-            "release_name": release_name,
-            "namespace": namespace,
-            "explanation": f"Deploying {deployment_target} using Helm"
-        }
-    
-    return {
-        "type": "unknown",
-        "explanation": "Could not determine what to deploy from the query"
-    }
+    return all_resources
 
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
-    """Use Gemini to map user query -> MCP tool + arguments or deployment action."""
+    """Use Gemini to map user query -> MCP tool + arguments."""
     tools = list_mcp_tools(server_url)
     tool_names = [t["name"] for t in tools if "name" in t]
-    tool_descriptions = get_tool_descriptions(server_url)
-
-    # First, check if this is a deployment request
-    deployment_result = handle_any_deployment(query)
-    if deployment_result["type"] == "helm_deploy":
-        return deployment_result
 
     # Inject context from session state if available
     context_notes = ""
@@ -405,51 +261,56 @@ def ask_gemini_for_tool_decision(query: str, server_url: str):
         context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
 
     instruction = f"""
-You are an AI agent that maps user queries to MCP tools for Kubernetes operations or deployment actions.
+You are an AI agent that maps user queries to MCP tools.
 User query: "{query}"
 {context_notes}
 
-Available tools and their descriptions:
-{tool_descriptions}
+Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
 Rules:
-- If the user wants to deploy/install any tool, chart, or application, respond with deployment action.
-- For viewing resources, use kubectl_get.
-- For modifying resources, use kubectl_patch or kubectl_edit.
-- For creating resources, use kubectl_apply or kubectl_create.
-- For deleting resources, use kubectl_delete.
-- Extract resource names, types, and namespaces from the query.
+- Only choose from the tools above.
+- If the query clearly maps to a tool, return tool + args in JSON.
+- If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
+- If unsure, set tool=null and args=null.
 
-For deployment requests, respond with:
-{{"type": "helm_deploy", "target": "chart-name", "release_name": "optional-name", "namespace": "optional-namespace", "explanation": "Short explanation"}}
-
-For tool requests, respond with:
-{{"type": "mcp_tool", "tool": "tool_name", "args": {{arguments}}, "explanation": "Short explanation"}}
-
-If unsure, respond with:
-{{"type": "unknown", "explanation": "Need more information"}}
+Respond ONLY in strict JSON:
+{{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
-    
     if not GEMINI_AVAILABLE:
-        # Fallback logic
+        # Fallback logic for common queries
         query_lower = query.lower()
-        
-        # Deployment detection fallback
-        if any(keyword in query_lower for keyword in ["deploy", "install", "setup", "add"]):
-            deployment_result = handle_any_deployment(query)
-            if deployment_result["type"] == "helm_deploy":
-                return deployment_result
-        
-        # View operations
         if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
             return {
-                "type": "mcp_tool",
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
                 "explanation": "User wants to see all resources in cluster"
             }
-        
-        return {"type": "unknown", "explanation": "Need more information about what you want to do"}
+        elif "pods" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "pods", "allNamespaces": True},
+                "explanation": "User wants to see all pods"
+            }
+        elif "services" in query_lower or "svc" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "services", "allNamespaces": True},
+                "explanation": "User wants to see all services"
+            }
+        elif "secrets" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "secrets", "allNamespaces": True},
+                "explanation": "User wants to see all secrets"
+            }
+        elif "nodes" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "nodes"},
+                "explanation": "User wants to see all nodes"
+            }
+        else:
+            return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -461,26 +322,19 @@ If unsure, respond with:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            # Try to extract JSON from text
-            try:
-                start = text.find('{')
-                end = text.rfind('}') + 1
-                if start != -1 and end != -1 and end > start:
-                    json_str = text[start:end]
-                    parsed = json.loads(json_str)
-            except:
-                pass
+            parsed = _extract_json_from_text(text)
         
         if not parsed:
-            parsed = {"type": "unknown", "explanation": f"Invalid response: {text}"}
+            parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
         
+        parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
         
     except Exception as e:
-        return {"type": "unknown", "explanation": f"Gemini error: {str(e)}"}
+        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Use Gemini to convert raw response into human-friendly answer."""
+    """Use Gemini to convert raw MCP response into human-friendly answer."""
     if not GEMINI_AVAILABLE:
         return generate_fallback_answer(user_input, raw_response)
 
@@ -498,15 +352,20 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
             "- Respond in clear, natural, conversational English.\n"
-            "- If it's a deployment result, explain what was deployed and any next steps.\n"
             "- If it's a list, format with bullet points.\n"
+            "- If it's status, explain health and issues clearly.\n"
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
+            "- If cluster name or size was inferred, mention that explicitly.\n"
+            "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
             "- NEVER show JSON, code, or internal errors to user unless asked.\n"
             "- Be helpful, friendly, and precise."
         )
         
         resp = model.generate_content(prompt)
         answer = getattr(resp, "text", str(resp)).strip()
+
+        # Extract and store cluster info for future context
+        extract_and_store_cluster_info(user_input, answer)
 
         return answer
 
@@ -515,27 +374,95 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
 
 def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     """Generate human-friendly answer without Gemini."""
-    
-    if "success" in raw_response:
-        if raw_response["success"]:
-            if "release_name" in raw_response:
-                return f"✅ Successfully deployed {raw_response.get('chart_name', 'the application')} as '{raw_response['release_name']}'. The deployment is now running in your cluster."
-            return "✅ Operation completed successfully."
-        else:
-            error_msg = raw_response.get("error", "Unknown error occurred")
-            return f"❌ Deployment failed: {error_msg}\n\nPlease check the chart name and repository URL, and ensure you have proper cluster access."
-    
     if "error" in raw_response:
         error_msg = raw_response["error"]
-        return f"❌ Operation failed: {error_msg}"
+        if "cluster" in user_input.lower():
+            return "I couldn't retrieve the cluster information right now. Please check if the MCP server is running and accessible."
+        return f"Sorry, I encountered an issue: {error_msg}"
     
     result = raw_response.get("result", {})
     
-    if isinstance(result, dict) and "items" in result:
-        count = len(result["items"])
-        return f"Found {count} resources matching your query."
+    # Handle different response formats
+    if isinstance(result, dict):
+        # Kubernetes-style responses with items
+        if "items" in result:
+            items = result["items"]
+            count = len(items)
+            
+            if "node" in user_input.lower() or "cluster size" in user_input.lower():
+                if count == 1:
+                    node_name = items[0].get("metadata", {}).get("name", "unknown")
+                    return f"This is a single-node cluster. The node is named: {node_name}"
+                else:
+                    return f"The cluster has {count} nodes."
+            
+            if "namespace" in user_input.lower():
+                namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
+                if namespaces:
+                    return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
+                else:
+                    return "No namespaces found."
+            
+            if "pod" in user_input.lower():
+                pods = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+                if pods:
+                    return f"Found {count} pods:\n" + "\n".join([f"• {pod}" for pod in pods])
+                else:
+                    return "No pods found."
+            
+            if "secret" in user_input.lower():
+                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+                if secrets:
+                    return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
+                else:
+                    return "No secrets found."
+        
+        # Jenkins-style responses
+        if "jobs" in result:
+            jobs = result["jobs"]
+            if jobs:
+                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
+            else:
+                return "No Jenkins jobs found."
+        
+        # ArgoCD-style responses
+        if "applications" in result:
+            apps = result["applications"]
+            if apps:
+                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
+            else:
+                return "No ArgoCD applications found."
     
-    return "Operation completed successfully."
+    # Generic fallback
+    if result:
+        return f"Operation completed successfully. Result: {json.dumps(result, indent=2)}"
+    
+    return "Operation completed successfully, but no data was returned."
+
+def extract_and_store_cluster_info(user_input: str, answer: str):
+    """Extract cluster name/size from Gemini answer and store in session."""
+    try:
+        # Extract cluster name
+        if "cluster name" in user_input.lower():
+            patterns = [
+                r"cluster[^\w]*([\w-]+)",
+                r"name[^\w][:\-]?[^\w]([\w-]+)",
+                r"\*([\w-]+)\*",  # bolded name
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, answer, re.IGNORECASE)
+                if match:
+                    cluster_name = match.group(1).strip()
+                    st.session_state.last_known_cluster_name = cluster_name
+                    break
+
+        # Extract cluster size
+        if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
+            numbers = re.findall(r'\b\d+\b', answer)
+            if numbers:
+                st.session_state.last_known_cluster_size = int(numbers[0])
+    except Exception:
+        pass  # silent fail
 
 # ---------------- STREAMLIT APP ----------------
 def main():
@@ -555,14 +482,8 @@ def main():
         
         st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
         
-        # Show available tools for selected server
-        if st.button("Refresh Available Tools"):
-            st.session_state.available_tools_cache = {}
-            st.rerun()
-        
         if st.button("Clear Chat History"):
             st.session_state.messages = []
-            st.session_state.available_tools_cache = {}
             st.rerun()
 
     # Main chat interface
@@ -601,7 +522,7 @@ def main():
     with st.chat_message("assistant"):
         st.markdown(server_info)
     
-    # Use Gemini to determine the best action
+    # Use Gemini to determine the best tool and arguments
     with st.spinner("🤔 Analyzing your request..."):
         decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
     
@@ -610,94 +531,53 @@ def main():
     with st.chat_message("assistant"):
         st.markdown(f"💡 {explanation}")
     
-    action_type = decision.get("type", "unknown")
+    tool_name = decision.get("tool")
+    tool_args = decision.get("args") or {}
     
-    # Handle different action types
-    if action_type == "helm_deploy":
-        # Deploy any Helm chart
-        target = decision.get("target")
-        release_name = decision.get("release_name")
-        namespace = decision.get("namespace", "default")
+    # Execute tool if one was selected
+    if tool_name:
+        with st.chat_message("assistant"):
+            st.markdown(f"🔧 Executing `{tool_name}`...")
         
-        if target:
-            with st.chat_message("assistant"):
-                st.markdown(f"🚀 Deploying **{target}** in namespace **{namespace}**...")
-            
-            with st.spinner(f"🔄 Deploying {target} (this may take a few minutes)..."):
-                result = deploy_helm_chart_flexible(target, release_name, namespace)
-            
-            # Generate human-readable response
-            final_answer = ask_gemini_answer(user_prompt, result)
-            
-            # Add to chat history
-            st.session_state.messages.append({"role": "assistant", "content": final_answer})
-            with st.chat_message("assistant"):
-                st.markdown(final_answer)
+        # Special handling for "all resources" request
+        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
+            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
+            with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
+                all_resources = get_all_cluster_resources(selected_server["url"])
+                resp = {"result": all_resources}
         else:
-            error_msg = "I couldn't determine what you want to deploy. Please be more specific (e.g., 'deploy gitlab', 'install nginx', 'setup prometheus')."
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            with st.chat_message("assistant"):
-                st.error(error_msg)
-    
-    elif action_type == "mcp_tool":
-        # Use MCP tool
-        tool_name = decision.get("tool")
-        tool_args = decision.get("args") or {}
-        
-        if tool_name:
-            with st.chat_message("assistant"):
-                st.markdown(f"🔧 Executing `{tool_name}`...")
-            
+            # Call the tool normally
             with st.spinner("🔄 Processing your request..."):
                 resp = call_tool(selected_server["url"], tool_name, tool_args)
-            
-            # Generate human-readable response
+        
+        # Generate human-readable response
+        with st.spinner("📝 Formatting response..."):
             final_answer = ask_gemini_answer(user_prompt, resp)
-            
-            # Add to chat history
-            st.session_state.messages.append({"role": "assistant", "content": final_answer})
-            with st.chat_message("assistant"):
-                st.markdown(final_answer)
-        else:
-            error_msg = "I couldn't determine which tool to use for your request."
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            with st.chat_message("assistant"):
-                st.error(error_msg)
+        
+        # Add to chat history
+        st.session_state.messages.append({"role": "assistant", "content": final_answer})
+        with st.chat_message("assistant"):
+            st.markdown(final_answer)
     
     else:
-        # Unknown action - provide helpful guidance
-        helpful_response = """
-**I can help you with various Kubernetes operations:**
-
-**🚀 Deployment Commands:**
-- "Deploy GitLab in my cluster"
-- "Install Vault Helm chart"  
-- "Setup Prometheus monitoring"
-- "Add nginx ingress controller"
-- "Install cert-manager for TLS certificates"
-- "Deploy Redis for caching"
-- "Setup Jenkins CI/CD"
-
-**🔧 Kubernetes Operations:**
-- "Show all pods in all namespaces"
-- "Get cluster nodes and status"
-- "List all services"
-- "Check cluster resources"
-- "Create a new deployment from YAML"
-
-**📊 Monitoring & Management:**
-- "Show cluster health"
-- "Check resource usage"
-- "List all running applications"
-
-**💡 Examples:**
-- `deploy gitlab` - Installs GitLab using official Helm chart
-- `install nginx` - Sets up nginx ingress controller  
-- `setup prometheus` - Deploys monitoring stack
-- `show all pods` - Lists all pods in cluster
-
-What would you like to do today?
-"""
+        # No tool selected - provide helpful suggestions
+        helpful_response = (
+            "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
+            "**For Kubernetes:**\n"
+            "- \"List all namespaces\"\n"
+            "- \"Show running pods\"\n"
+            "- \"Get cluster nodes\"\n"
+            "- \"Show all services\"\n"
+            "- \"List all secrets\"\n"
+            "- \"Show all resources in cluster\"\n\n"
+            "**For Jenkins:**\n"
+            "- \"List all jobs\"\n"
+            "- \"Show build status\"\n\n"
+            "**For ArgoCD:**\n"
+            "- \"List applications\"\n"
+            "- \"Show application status\"\n\n"
+            "Or try being more specific about what you'd like to see!"
+        )
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
         with st.chat_message("assistant"):
