@@ -5,8 +5,9 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import re
+import yaml
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -39,6 +40,7 @@ if "messages" not in st.session_state:
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
     st.session_state.available_servers = SERVERS
+    st.session_state.available_tools_cache = {}  # Cache for tools per server
 
 # ---------------- HELPERS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
@@ -84,24 +86,30 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
-def list_mcp_tools(server_url: str):
-    """Fetch available MCP tools for a specific server."""
+def list_mcp_tools(server_url: str) -> List[Dict[str, Any]]:
+    """Fetch available MCP tools for a specific server with caching."""
+    if server_url in st.session_state.available_tools_cache:
+        return st.session_state.available_tools_cache[server_url]
+    
     resp = direct_mcp_call(server_url, "tools/list")
+    tools = []
+    
     if not isinstance(resp, dict):
-        return []
+        st.session_state.available_tools_cache[server_url] = tools
+        return tools
     
     # Handle different response formats
     result = resp.get("result", {})
     if isinstance(result, dict):
-        return result.get("tools", [])
-    if isinstance(result, list):
-        return result
+        tools = result.get("tools", [])
+    elif isinstance(result, list):
+        tools = result
+    elif "tools" in resp:
+        tools = resp["tools"]
     
-    # Check if tools are at the root level
-    if "tools" in resp:
-        return resp["tools"]
-    
-    return []
+    # Cache the tools
+    st.session_state.available_tools_cache[server_url] = tools
+    return tools
 
 def call_tool(server_url: str, name: str, arguments: dict):
     """Execute MCP tool by name with arguments."""
@@ -112,6 +120,30 @@ def call_tool(server_url: str, name: str, arguments: dict):
         "name": name,
         "arguments": arguments
     })
+
+def get_tool_descriptions(server_url: str) -> str:
+    """Get detailed descriptions of all available tools."""
+    tools = list_mcp_tools(server_url)
+    descriptions = []
+    
+    for tool in tools:
+        name = tool.get("name", "")
+        description = tool.get("description", "No description available")
+        input_schema = tool.get("inputSchema", {})
+        
+        # Extract parameter information
+        params = input_schema.get("properties", {})
+        param_desc = []
+        for param_name, param_info in params.items():
+            param_type = param_info.get("type", "unknown")
+            param_desc.append(f"  - {param_name} ({param_type}): {param_info.get('description', 'No description')}")
+        
+        tool_desc = f"{name}: {description}"
+        if param_desc:
+            tool_desc += f"\nParameters:\n" + "\n".join(param_desc)
+        descriptions.append(tool_desc)
+    
+    return "\n\n".join(descriptions)
 
 def sanitize_args(args: dict):
     """Fix arguments before sending to MCP tools."""
@@ -125,7 +157,7 @@ def sanitize_args(args: dict):
         fixed["resourceType"] = fixed.pop("resource")
     
     # Set default namespace for pods if not specified
-    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
+    if fixed.get("resourceType") in ["pods", "services", "deployments", "configmaps", "secrets"] and "namespace" not in fixed:
         fixed["namespace"] = "default"
     
     # Handle "all namespaces" request
@@ -147,6 +179,10 @@ def sanitize_args(args: dict):
         "svc": "services",
         "cm": "configmaps",
         "secret": "secrets",
+        "ingress": "ingresses",
+        "pv": "persistentvolumes",
+        "pvc": "persistentvolumeclaims",
+        "sa": "serviceaccounts",
         "all": "all"
     }
     
@@ -187,13 +223,11 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
             server_name = server["name"].lower()
             
             # Kubernetes queries
-            if (("kubernetes" in query_lower or "k8s" in query_lower or 
-                 "pod" in query_lower or "namespace" in query_lower or
-                 "deployment" in query_lower or "service" in query_lower or
-                 "secret" in query_lower or "configmap" in query_lower or
-                 "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower) and 
-                ("kubernetes" in server_name or "k8s" in server_name)):
+            kubernetes_keywords = ["kubernetes", "k8s", "pod", "namespace", "deployment", 
+                                 "service", "secret", "configmap", "node", "cluster", 
+                                 "resource", "patch", "apply", "delete", "create", "get",
+                                 "loadbalancer", "clusterip", "nodeport", "ingress"]
+            if any(keyword in query_lower for keyword in kubernetes_keywords) and ("kubernetes" in server_name or "k8s" in server_name):
                 return server
                 
             # Jenkins queries
@@ -218,7 +252,8 @@ def get_all_cluster_resources(server_url: str):
     """Get all resources in the cluster by querying multiple resource types."""
     resource_types = [
         "pods", "services", "deployments", "configmaps", 
-        "secrets", "namespaces", "nodes"
+        "secrets", "namespaces", "nodes", "ingresses",
+        "persistentvolumes", "persistentvolumeclaims", "serviceaccounts"
     ]
     
     all_resources = {}
@@ -247,11 +282,220 @@ def get_all_cluster_resources(server_url: str):
     
     return all_resources
 
+def execute_complex_operation(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
+    """Handle complex operations that might require multiple steps or specific tool combinations."""
+    query_lower = user_query.lower()
+    
+    # Service type change operation
+    if any(keyword in query_lower for keyword in ["loadbalancer", "clusterip", "nodeport", "change service", "service type"]):
+        return handle_service_type_change(server_url, user_query)
+    
+    # Resource creation operation
+    if any(keyword in query_lower for keyword in ["create", "apply", "new", "add"]):
+        return handle_resource_creation(server_url, user_query, available_tools)
+    
+    # Resource modification operation
+    if any(keyword in query_lower for keyword in ["patch", "update", "modify", "edit", "change"]):
+        return handle_resource_modification(server_url, user_query, available_tools)
+    
+    # Resource deletion operation
+    if any(keyword in query_lower for keyword in ["delete", "remove", "destroy"]):
+        return handle_resource_deletion(server_url, user_query, available_tools)
+    
+    return {"tool": None, "args": None, "explanation": "Complex operation detection failed"}
+
+def handle_service_type_change(server_url: str, user_query: str) -> Dict[str, Any]:
+    """Handle service type change operations."""
+    # Extract service name and namespace from query
+    service_name = extract_entity_name(user_query, "service")
+    namespace = extract_namespace(user_query) or "default"
+    target_type = "ClusterIP"  # Default target type
+    
+    if "loadbalancer" in user_query.lower():
+        target_type = "LoadBalancer"
+    elif "nodeport" in user_query.lower():
+        target_type = "NodePort"
+    
+    if service_name:
+        return {
+            "tool": "kubectl_patch",
+            "args": {
+                "resourceType": "services",
+                "name": service_name,
+                "namespace": namespace,
+                "patch": json.dumps({"spec": {"type": target_type}}),
+                "type": "strategic"
+            },
+            "explanation": f"Changing service {service_name} in namespace {namespace} to {target_type}"
+        }
+    
+    return {"tool": None, "args": None, "explanation": "Could not extract service name from query"}
+
+def handle_resource_creation(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
+    """Handle resource creation operations."""
+    if "kubectl_apply" in available_tools or "kubectl_create" in available_tools:
+        tool_name = "kubectl_apply" if "kubectl_apply" in available_tools else "kubectl_create"
+        
+        # Try to extract YAML/JSON content from query or generate basic template
+        yaml_content = extract_yaml_content(user_query)
+        if not yaml_content:
+            yaml_content = generate_basic_template(user_query)
+        
+        if yaml_content:
+            return {
+                "tool": tool_name,
+                "args": {
+                    "filename": "generated-resource.yaml",
+                    "yamlContent": yaml_content
+                },
+                "explanation": f"Creating resource using {tool_name}"
+            }
+    
+    return {"tool": None, "args": None, "explanation": "Resource creation not supported with available tools"}
+
+def handle_resource_modification(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
+    """Handle resource modification operations."""
+    if "kubectl_patch" in available_tools:
+        resource_type = extract_resource_type(user_query)
+        resource_name = extract_entity_name(user_query, resource_type or "resource")
+        namespace = extract_namespace(user_query) or "default"
+        
+        if resource_type and resource_name:
+            return {
+                "tool": "kubectl_patch",
+                "args": {
+                    "resourceType": resource_type,
+                    "name": resource_name,
+                    "namespace": namespace,
+                    "patch": '{"spec": {"replicas": 1}}',  # Default patch
+                    "type": "strategic"
+                },
+                "explanation": f"Patching {resource_type} {resource_name} in namespace {namespace}"
+            }
+    
+    return {"tool": None, "args": None, "explanation": "Resource modification not supported with available tools"}
+
+def handle_resource_deletion(server_url: str, user_query: str, available_tools: List[str]) -> Dict[str, Any]:
+    """Handle resource deletion operations."""
+    if "kubectl_delete" in available_tools:
+        resource_type = extract_resource_type(user_query)
+        resource_name = extract_entity_name(user_query, resource_type or "resource")
+        namespace = extract_namespace(user_query) or "default"
+        
+        if resource_type and resource_name:
+            return {
+                "tool": "kubectl_delete",
+                "args": {
+                    "resourceType": resource_type,
+                    "name": resource_name,
+                    "namespace": namespace
+                },
+                "explanation": f"Deleting {resource_type} {resource_name} from namespace {namespace}"
+            }
+    
+    return {"tool": None, "args": None, "explanation": "Resource deletion not supported with available tools"}
+
+def extract_entity_name(query: str, entity_type: str) -> Optional[str]:
+    """Extract entity name from query."""
+    patterns = [
+        rf"{entity_type}\s+(\w+)",
+        rf"(\w+)\s+{entity_type}",
+        rf"{entity_type}[^\w]*([\w-]+)",
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def extract_resource_type(query: str) -> Optional[str]:
+    """Extract resource type from query."""
+    resource_types = ["pod", "service", "deployment", "configmap", "secret", "namespace", "node", "ingress"]
+    
+    for resource_type in resource_types:
+        if resource_type in query.lower():
+            return resource_type + "s"  # Pluralize
+    
+    return None
+
+def extract_namespace(query: str) -> Optional[str]:
+    """Extract namespace from query."""
+    patterns = [
+        r"namespace\s+(\w+)",
+        r"in\s+(\w+)\s+namespace",
+        r"namespace[^\w]*([\w-]+)",
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return None
+
+def extract_yaml_content(query: str) -> Optional[str]:
+    """Extract YAML content from query."""
+    # Look for YAML blocks in the query
+    yaml_pattern = r"```(?:yaml)?\s*(.*?)\s*```"
+    match = re.search(yaml_pattern, query, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1)
+    
+    return None
+
+def generate_basic_template(query: str) -> Optional[str]:
+    """Generate a basic Kubernetes template based on query content."""
+    query_lower = query.lower()
+    
+    if "deployment" in query_lower:
+        return """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80"""
+    
+    elif "service" in query_lower:
+        return """apiVersion: v1
+kind: Service
+metadata:
+  name: example-service
+spec:
+  selector:
+    app: example
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP"""
+    
+    return None
+
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
     tools = list_mcp_tools(server_url)
     tool_names = [t["name"] for t in tools if "name" in t]
+    tool_descriptions = get_tool_descriptions(server_url)
+
+    # First, try complex operation detection
+    complex_result = execute_complex_operation(server_url, query, tool_names)
+    if complex_result.get("tool"):
+        return complex_result
 
     # Inject context from session state if available
     context_notes = ""
@@ -261,56 +505,62 @@ def ask_gemini_for_tool_decision(query: str, server_url: str):
         context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
 
     instruction = f"""
-You are an AI agent that maps user queries to MCP tools.
+You are an AI agent that maps user queries to MCP tools for Kubernetes operations.
 User query: "{query}"
 {context_notes}
 
-Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
+Available tools and their descriptions:
+{tool_descriptions}
 
 Rules:
-- Only choose from the tools above.
-- If the query clearly maps to a tool, return tool + args in JSON.
-- If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
+- Choose the most appropriate tool for the user's request.
+- For viewing resources, use kubectl_get.
+- For modifying resources, use kubectl_patch or kubectl_edit.
+- For creating resources, use kubectl_apply or kubectl_create.
+- For deleting resources, use kubectl_delete.
+- Extract resource names, types, and namespaces from the query.
+- Set appropriate arguments based on the query.
 - If unsure, set tool=null and args=null.
 
-Respond ONLY in strict JSON:
+Respond ONLY in strict JSON format:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
     if not GEMINI_AVAILABLE:
-        # Fallback logic for common queries
+        # Enhanced fallback logic
         query_lower = query.lower()
+        
+        # View operations
         if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
                 "explanation": "User wants to see all resources in cluster"
             }
-        elif "pods" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods"
-            }
-        elif "services" in query_lower or "svc" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "services", "allNamespaces": True},
-                "explanation": "User wants to see all services"
-            }
-        elif "secrets" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "secrets", "allNamespaces": True},
-                "explanation": "User wants to see all secrets"
-            }
-        elif "nodes" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "nodes"},
-                "explanation": "User wants to see all nodes"
-            }
-        else:
-            return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
+        elif any(resource in query_lower for resource in ["pods", "services", "deployments", "secrets", "configmaps", "nodes", "namespaces"]):
+            for resource in ["pods", "services", "deployments", "secrets", "configmaps", "nodes", "namespaces"]:
+                if resource in query_lower:
+                    return {
+                        "tool": "kubectl_get",
+                        "args": {"resourceType": resource, "allNamespaces": True},
+                        "explanation": f"User wants to see all {resource}"
+                    }
+        
+        # Modification operations
+        elif any(keyword in query_lower for keyword in ["change", "modify", "update", "patch"]):
+            resource_type = extract_resource_type(query)
+            resource_name = extract_entity_name(query, resource_type or "resource")
+            if resource_type and resource_name:
+                return {
+                    "tool": "kubectl_patch",
+                    "args": {
+                        "resourceType": resource_type,
+                        "name": resource_name,
+                        "namespace": extract_namespace(query) or "default"
+                    },
+                    "explanation": f"Modifying {resource_type} {resource_name}"
+                }
+        
+        return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
@@ -374,6 +624,14 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
 
 def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     """Generate human-friendly answer without Gemini."""
+    
+    # Handle service type change responses
+    if "service" in user_input.lower() and ("change" in user_input.lower() or "modify" in user_input.lower()):
+        if raw_response.get("success"):
+            return raw_response.get("message", "Service type changed successfully!")
+        elif raw_response.get("error"):
+            return f"Failed to change service type: {raw_response['error']}"
+    
     if "error" in raw_response:
         error_msg = raw_response["error"]
         if "cluster" in user_input.lower():
@@ -417,25 +675,19 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                 else:
                     return "No secrets found."
         
-        # Jenkins-style responses
-        if "jobs" in result:
-            jobs = result["jobs"]
-            if jobs:
-                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
-            else:
-                return "No Jenkins jobs found."
-        
-        # ArgoCD-style responses
-        if "applications" in result:
-            apps = result["applications"]
-            if apps:
-                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
-            else:
-                return "No ArgoCD applications found."
+        # Success messages for operations
+        if "metadata" in result and "name" in result.get("metadata", {}):
+            resource_name = result["metadata"]["name"]
+            if "delete" in user_input.lower():
+                return f"Successfully deleted {resource_name}"
+            elif "create" in user_input.lower() or "apply" in user_input.lower():
+                return f"Successfully created {resource_name}"
+            elif "patch" in user_input.lower() or "update" in user_input.lower():
+                return f"Successfully updated {resource_name}"
     
-    # Generic fallback
-    if result:
-        return f"Operation completed successfully. Result: {json.dumps(result, indent=2)}"
+    # Generic success message
+    if result and not isinstance(result, str):
+        return "Operation completed successfully."
     
     return "Operation completed successfully, but no data was returned."
 
@@ -482,8 +734,14 @@ def main():
         
         st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
         
+        # Show available tools for selected server
+        if st.button("Refresh Available Tools"):
+            st.session_state.available_tools_cache = {}
+            st.rerun()
+        
         if st.button("Clear Chat History"):
             st.session_state.messages = []
+            st.session_state.available_tools_cache = {}
             st.rerun()
 
     # Main chat interface
@@ -560,23 +818,27 @@ def main():
             st.markdown(final_answer)
     
     else:
-        # No tool selected - provide helpful suggestions
+        # No tool selected - provide helpful suggestions with available tools
+        available_tools = list_mcp_tools(selected_server["url"])
+        tool_names = [t.get("name", "") for t in available_tools if t.get("name")]
+        
         helpful_response = (
-            "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
-            "**For Kubernetes:**\n"
-            "- \"List all namespaces\"\n"
-            "- \"Show running pods\"\n"
-            "- \"Get cluster nodes\"\n"
-            "- \"Show all services\"\n"
-            "- \"List all secrets\"\n"
-            "- \"Show all resources in cluster\"\n\n"
-            "**For Jenkins:**\n"
-            "- \"List all jobs\"\n"
-            "- \"Show build status\"\n\n"
-            "**For ArgoCD:**\n"
-            "- \"List applications\"\n"
-            "- \"Show application status\"\n\n"
-            "Or try being more specific about what you'd like to see!"
+            f"I couldn't find a specific tool to answer your question. Here are the available tools and what you can try:\n\n"
+            f"**Available Tools:** {', '.join(tool_names)}\n\n"
+            "**Common Kubernetes Operations:**\n"
+            "- \"List all pods in all namespaces\"\n"
+            "- \"Show all services in the cluster\"\n"
+            "- \"Get cluster nodes and status\"\n"
+            "- \"Change service myservice from LoadBalancer to ClusterIP\"\n"
+            "- \"Create a new deployment from YAML\"\n"
+            "- \"Delete pod my-pod in default namespace\"\n"
+            "- \"Patch deployment my-deployment to set replicas to 3\"\n"
+            "- \"Show all resources in the cluster\"\n\n"
+            "**Examples:**\n"
+            "- `kubectl get pods --all-namespaces` → \"show me all pods\"\n"
+            "- `kubectl patch service myservice --type='merge' -p='{\"spec\":{\"type\":\"ClusterIP\"}}'` → \"change service myservice to clusterip\"\n"
+            "- `kubectl apply -f deployment.yaml` → \"create this deployment\" (provide YAML)\n\n"
+            "Try being more specific about what you'd like to do!"
         )
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
