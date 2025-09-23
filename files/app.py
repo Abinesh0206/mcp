@@ -38,6 +38,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
+    st.session_state.last_known_namespace = None  # ✅ NEW: Track last namespace
     st.session_state.available_servers = SERVERS
 
 # ---------------- HELPERS ----------------
@@ -108,16 +109,34 @@ def call_tool(server_url: str, name: str, arguments: dict):
         "arguments": arguments
     })
 
-def sanitize_args(args: dict):
-    """Fix arguments before sending to MCP tools."""
+def sanitize_args(args: dict, user_query: str = ""):
+    """Fix arguments before sending to MCP tools — now with namespace extraction from query."""
     if not args:
-        return {}
+        args = {}
 
     fixed = args.copy()
     
+    # Extract namespace from user query if not provided
+    if "namespace" not in fixed and user_query:
+        # Patterns: "in ns X", "in namespace X", "-n X", "X namespace"
+        patterns = [
+            r"in\s+ns\s+(\S+)",
+            r"in\s+namespace\s+(\S+)",
+            r"-n\s+(\S+)",
+            r"(\S+)\s+namespace",
+            r"namespace\s+(\S+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, user_query, re.IGNORECASE)
+            if match:
+                fixed["namespace"] = match.group(1)
+                break
+
+    # Handle resource/resourceType naming
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
     
+    # Handle events
     if fixed.get("resourceType") == "events":
         if "namespace" not in fixed:
             fixed["allNamespaces"] = True
@@ -125,17 +144,21 @@ def sanitize_args(args: dict):
             fixed["allNamespaces"] = True
             fixed.pop("namespace", None)
     
+    # Set default namespace for pods if not specified
     elif fixed.get("resourceType") == "pods" and "namespace" not in fixed:
-        fixed["namespace"] = "default"
+        fixed["namespace"] = st.session_state.get("last_known_namespace", "default")
     
+    # Handle "all namespaces"
     elif fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
     
+    # Handle "all resources"
     if fixed.get("resourceType") == "all":
         fixed["allResources"] = True
         fixed.pop("resourceType", None)
     
+    # Resource type mappings
     resource_mappings = {
         "ns": "namespaces",
         "pod": "pods",
@@ -185,7 +208,8 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                  "secret" in query_lower or "configmap" in query_lower or
                  "node" in query_lower or "cluster" in query_lower or
                  "resource" in query_lower or "error" in query_lower or
-                 "event" in query_lower or "pending" in query_lower) and 
+                 "event" in query_lower or "pending" in query_lower or
+                 "describe" in query_lower) and 
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
@@ -268,11 +292,9 @@ def get_cluster_events_with_errors(server_url: str):
     except Exception as e:
         return [{"error": f"Exception while getting events: {str(e)}"}]
 
-# ✅ NEW FUNCTION: Get pending pods + reason using kubectl_describe
 def get_pending_pods_with_reason(server_url: str):
     """Get all pending pods and use kubectl_describe to find scheduling reason."""
     try:
-        # Step 1: Get all pods in all namespaces
         pods_response = call_tool(server_url, "kubectl_get", {
             "resourceType": "pods",
             "allNamespaces": True
@@ -295,7 +317,9 @@ def get_pending_pods_with_reason(server_url: str):
                 name = metadata.get("name", "unknown")
                 namespace = metadata.get("namespace", "default")
 
-                # Step 2: Describe the pod to get events/reason
+                # Store last known namespace for future queries
+                st.session_state.last_known_namespace = namespace
+
                 describe_response = call_tool(server_url, "kubectl_describe", {
                     "resourceType": "pod",
                     "name": name,
@@ -306,17 +330,15 @@ def get_pending_pods_with_reason(server_url: str):
                 if not describe_response.get("error"):
                     describe_text = describe_response.get("result", "")
                     if isinstance(describe_text, str):
-                        # Extract from Events section
                         events_start = describe_text.find("Events:")
                         if events_start != -1:
                             events_text = describe_text[events_start:]
                             lines = events_text.splitlines()
-                            for line in lines[2:]:  # Skip "Events:" and separator
+                            for line in lines[2:]:
                                 if "Warning" in line or "Failed" in line or "Insufficient" in line:
                                     reason = line.strip()
                                     break
                         else:
-                            # Fallback: look for common reasons in whole text
                             if "Insufficient cpu" in describe_text:
                                 reason = "Insufficient CPU resources in cluster."
                             elif "Insufficient memory" in describe_text:
@@ -349,18 +371,21 @@ def ask_gemini_for_tool_decision(query: str, server_url: str):
         context_notes += f"\nUser previously interacted with cluster: {st.session_state.last_known_cluster_name}"
     if st.session_state.last_known_cluster_size:
         context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
+    if st.session_state.last_known_namespace:
+        context_notes += f"\nLast used namespace: {st.session_state.last_known_namespace}"
 
     instruction = f"""
 You are an AI agent that maps user queries to MCP tools.
 User query: "{query}"
 {context_notes}
 
-Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
+Available tools: {json.dumps(tool_names, indent=2)}
 
 Rules:
-- If user asks about "pending pods", "why pod is pending", "reason for pending", use tool: kubectl_get for pods first, THEN use kubectl_describe on each pending pod.
-- If query is about errors/issues → use kubectl_get with resourceType=events and allNamespaces=true.
-- If user asks for "all resources" → use kubectl_get with appropriate args.
+- If user says "describe pod X [in ns Y]" → use tool: kubectl_describe, args: {{"name": "X", "namespace": "Y" or last_known_namespace or "default"}}
+- If user asks about "pending pods" → use custom_pending_pods_check
+- If about errors → kubectl_get with resourceType=events, allNamespaces=true
+- Extract namespace from query if possible.
 - If unsure → tool=null, args=null.
 
 Respond ONLY in strict JSON:
@@ -368,6 +393,22 @@ Respond ONLY in strict JSON:
 """
     if not GEMINI_AVAILABLE:
         query_lower = query.lower()
+        if "describe pod" in query_lower:
+            # Extract pod name and namespace
+            parts = query.split()
+            if len(parts) >= 3:
+                name = parts[2]
+                namespace = st.session_state.get("last_known_namespace", "default")
+                # Try to extract namespace from query
+                for i, part in enumerate(parts):
+                    if part in ["in", "ns", "namespace", "-n"] and i+1 < len(parts):
+                        namespace = parts[i+1]
+                        break
+                return {
+                    "tool": "kubectl_describe",
+                    "args": {"resourceType": "pod", "name": name, "namespace": namespace},
+                    "explanation": f"Describing pod {name} in namespace {namespace}"
+                }
         if "pending" in query_lower and ("pod" in query_lower or "pods" in query_lower):
             return {
                 "tool": "custom_pending_pods_check",
@@ -380,41 +421,17 @@ Respond ONLY in strict JSON:
                 "args": {"resourceType": "events", "allNamespaces": True},
                 "explanation": "User wants to see errors/issues in cluster - checking events"
             }
-        if "all resources" in query_lower or "everything" in query_lower:
+        if "pods" in query_lower and "efk" in query_lower:
             return {
                 "tool": "kubectl_get",
-                "args": {"resourceType": "all", "allNamespaces": True},
-                "explanation": "User wants to see all resources in cluster"
+                "args": {"resourceType": "pods", "namespace": "efk"},
+                "explanation": "User wants to see pods in efk namespace"
             }
         if "pods" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "pods", "allNamespaces": True},
                 "explanation": "User wants to see all pods"
-            }
-        if "events" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "events", "allNamespaces": True},
-                "explanation": "User wants to see cluster events"
-            }
-        if "services" in query_lower or "svc" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "services", "allNamespaces": True},
-                "explanation": "User wants to see all services"
-            }
-        if "secrets" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "secrets", "allNamespaces": True},
-                "explanation": "User wants to see all secrets"
-            }
-        if "nodes" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "nodes"},
-                "explanation": "User wants to see all nodes"
             }
         else:
             return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
@@ -433,7 +450,8 @@ Respond ONLY in strict JSON:
         if not parsed:
             parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
         
-        parsed["args"] = sanitize_args(parsed.get("args") or {})
+        # Pass user query to sanitize_args for namespace extraction
+        parsed["args"] = sanitize_args(parsed.get("args") or {}, query)
         return parsed
         
     except Exception as e:
@@ -449,6 +467,8 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             context_notes += f"\nPreviously known cluster: {st.session_state.last_known_cluster_name}"
         if st.session_state.last_known_cluster_size:
             context_notes += f"\nPreviously known size: {st.session_state.last_known_cluster_size} nodes"
+        if st.session_state.last_known_namespace:
+            context_notes += f"\nLast used namespace: {st.session_state.last_known_namespace}"
 
         model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = (
@@ -457,16 +477,11 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
             "- Respond in clear, natural, conversational English.\n"
-            "- If it's pending pods, format as:\n"
-            "  'I found X pending pod(s):\n"
-            "   • [Pod Name] in [Namespace]: [Reason]\n"
-            "   How to fix: [Actionable advice based on reason]'\n"
-            "- If no pending pods → 'No pending pods found. All pods are running normally.'\n"
-            "- If error events → bullet list with namespace, reason, message.\n"
-            "- If no errors → 'No errors detected in the cluster. Everything looks healthy!'\n"
-            "- If error occurred → politely explain what went wrong and suggest what user can do.\n"
-            "- NEVER show JSON, code, or internal errors unless asked.\n"
-            "- Be helpful, friendly, and precise."
+            "- If describing a pod, show Events section if available.\n"
+            "- If pending pods → show name, namespace, reason, and fix advice.\n"
+            "- If pod not found → say 'Pod not found' and suggest checking name/namespace.\n"
+            "- NEVER show raw JSON or errors unless asked.\n"
+            "- Be helpful, precise, and friendly."
         )
         
         resp = model.generate_content(prompt)
@@ -482,43 +497,56 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
 def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     if "error" in raw_response:
         error_msg = raw_response["error"]
+        if "not found" in error_msg.lower():
+            return "Pod or resource not found. Please double-check the name and namespace. You can list pods with `kubectl get pods -n <namespace>`."
         return f"Sorry, I encountered an issue: {error_msg}"
 
     result = raw_response.get("result", {})
 
-    # ✅ Handle pending pods response
+    # Handle pending pods
     if isinstance(result, list) and len(result) > 0 and "name" in result[0] and "reason" in result[0]:
-        # This is likely a pending pods response
         count = len(result)
         if count == 0:
             return "No pending pods found. All pods are running normally."
 
-        lines = [f"OK. I found {count} pending pod(s) in your cluster:"]
+        lines = [f"✅ I found {count} pending pod(s):"]
         for pod in result:
             name = pod.get("name", "unknown")
             ns = pod.get("namespace", "default")
             reason = pod.get("reason", "Unknown reason")
 
-            lines.append(f"\nPod Name: {name}\nNamespace: {ns}\nStatus: Pending\nReason: {reason}")
+            lines.append(f"\n🔹 Pod: `{name}`\n   Namespace: `{ns}`\n   Reason: {reason}")
 
-            # Add fix suggestion based on reason
             fix = ""
             if "Insufficient cpu" in reason:
-                fix = "💡 Fix: Scale up your cluster or reduce CPU requests in your pod spec."
+                fix = "💡 **Fix**: Scale up cluster nodes or reduce CPU `requests` in pod spec."
             elif "Insufficient memory" in reason:
-                fix = "💡 Fix: Add more memory to nodes or reduce memory requests in pod spec."
+                fix = "💡 **Fix**: Add more memory or reduce memory `requests`."
             elif "node(s) had taint" in reason:
-                fix = "💡 Fix: Add matching tolerations to your pod or remove taints from nodes."
+                fix = "💡 **Fix**: Add `tolerations` to pod spec or remove taints from nodes."
             elif "Failed to pull image" in reason:
-                fix = "💡 Fix: Check image name, tag, and registry access. Does the image exist?"
+                fix = "💡 **Fix**: Verify image name/tag and registry access. Does `docker pull` work?"
             elif "node affinity" in reason:
-                fix = "💡 Fix: Check node labels and pod affinity rules. Are there matching nodes?"
+                fix = "💡 **Fix**: Check node labels match pod’s `nodeAffinity` rules."
             else:
-                fix = "💡 Fix: Run `kubectl describe pod <name> -n <namespace>` for detailed events."
+                fix = f"💡 **Fix**: Run `kubectl describe pod {name} -n {ns}` for detailed events."
 
             lines.append(fix)
 
         return "\n".join(lines)
+
+    # Handle kubectl_describe output
+    if isinstance(result, str) and ("Events:" in result or "Name:" in result):
+        # Store namespace if found
+        ns_match = re.search(r"Namespace:\s*(\S+)", result)
+        if ns_match:
+            st.session_state.last_known_namespace = ns_match.group(1)
+
+        # Return full describe but clean up
+        if "not found" in result.lower():
+            return "❌ Pod not found. Please verify the pod name and namespace."
+
+        return f"```\n{result.strip()}\n```"
 
     # Existing logic for events, nodes, etc.
     if isinstance(result, dict):
@@ -540,58 +568,31 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                                 error_count += 1
                                 error_details.append(f"• **{namespace}**: {reason} - {message}")
                     if error_count > 0:
-                        return f"Found {error_count} error events in the cluster:\n\n" + "\n".join(error_details)
+                        return f"⚠️ Found {error_count} error events:\n\n" + "\n".join(error_details)
                     else:
-                        return "No error events found in the cluster. Everything looks healthy! 🎉"
+                        return "✅ No error events found. Cluster is healthy!"
                 else:
-                    return "No events found in the cluster."
+                    return "No events found."
 
-            if "node" in user_input.lower():
-                if count == 1:
-                    node_name = items[0].get("metadata", {}).get("name", "unknown")
-                    return f"This is a single-node cluster. The node is named: {node_name}"
-                else:
-                    return f"The cluster has {count} nodes."
-
-            if "namespace" in user_input.lower():
-                namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
-                if namespaces:
-                    return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
-                else:
-                    return "No namespaces found."
-
-            if "pod" in user_input.lower():
-                pods = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+            if "pod" in user_input.lower() and isinstance(items, list):
+                pods = []
+                for item in items:
+                    if isinstance(item, dict):
+                        name = item.get("metadata", {}).get("name", "unnamed")
+                        ns = item.get("metadata", {}).get("namespace", "default")
+                        phase = item.get("status", {}).get("phase", "Unknown")
+                        pods.append(f"• `{name}` in `{ns}` → **{phase}**")
+                        if phase == "Pending":
+                            st.session_state.last_known_namespace = ns  # Remember for next query
                 if pods:
-                    return f"Found {count} pods:\n" + "\n".join([f"• {pod}" for pod in pods])
+                    return f"📋 Found {count} pod(s):\n" + "\n".join(pods)
                 else:
                     return "No pods found."
 
-            if "secret" in user_input.lower():
-                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
-                if secrets:
-                    return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
-                else:
-                    return "No secrets found."
-
-        if "jobs" in result:
-            jobs = result["jobs"]
-            if jobs:
-                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
-            else:
-                return "No Jenkins jobs found."
-
-        if "applications" in result:
-            apps = result["applications"]
-            if apps:
-                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
-            else:
-                return "No ArgoCD applications found."
-
     if result:
-        return f"Operation completed successfully. Result: {json.dumps(result, indent=2)}"
+        return f"✅ Operation completed: {json.dumps(result, indent=2)}"
 
-    return "Operation completed successfully, but no data was returned."
+    return "✅ Done."
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
     try:
@@ -612,6 +613,12 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
             numbers = re.findall(r'\b\d+\b', answer)
             if numbers:
                 st.session_state.last_known_cluster_size = int(numbers[0])
+
+        if "namespace" in user_input.lower():
+            ns_match = re.search(r"namespace[^\w]*([\w-]+)", answer, re.IGNORECASE)
+            if ns_match:
+                st.session_state.last_known_namespace = ns_match.group(1).strip()
+
     except Exception:
         pass
 
@@ -630,6 +637,7 @@ def main():
         st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
         if st.button("Clear Chat History"):
             st.session_state.messages = []
+            st.session_state.last_known_namespace = None
             st.rerun()
 
     st.subheader("What's on your mind today? 🤔")
@@ -677,7 +685,6 @@ def main():
         with st.chat_message("assistant"):
             st.markdown(f"🔧 Executing `{tool_name}`...")
 
-        # ✅ Handle pending pods specially
         if tool_name == "custom_pending_pods_check":
             with st.spinner("🔍 Scanning for pending pods and reasons..."):
                 pending_pods = get_pending_pods_with_reason(selected_server["url"])
@@ -715,14 +722,16 @@ def main():
             "- \"Show errors in cluster\"\n"
             "- \"Check cluster events\"\n"
             "- \"Show all resources in cluster\"\n"
-            "- \"Show pending pods and reasons\"\n\n"
-            "**For Jenkins:**\n"
+            "- \"Show pending pods and reasons\"\n"
+            "- \"Describe pod <name> in namespace <ns>\"\n\n"
+            "**Examples:**\n"
+            "  • `describe pod my-pod dev`\n"
+            "  • `show pods in efk namespace`\n"
+            "  • `kubectl describe pod my-pod -n prod`\n\n"
+            "**For Jenkins/ArgoCD:**\n"
             "- \"List all jobs\"\n"
-            "- \"Show build status\"\n\n"
-            "**For ArgoCD:**\n"
-            "- \"List applications\"\n"
-            "- \"Show application status\"\n\n"
-            "Or try being more specific about what you'd like to see!"
+            "- \"List applications\"\n\n"
+            "Or try being more specific!"
         )
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
