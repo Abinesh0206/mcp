@@ -5,13 +5,18 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import re
+import logging
 
-# ---------------- CONFIG ----------------
+# ---------------- CONFIG & LOGGING ----------------
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configure Gemini if available
 GEMINI_AVAILABLE = False
@@ -19,7 +24,9 @@ if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         GEMINI_AVAILABLE = True
-    except Exception:
+        logger.info("Gemini AI configured successfully")
+    except Exception as e:
+        logger.error(f"Gemini configuration failed: {e}")
         GEMINI_AVAILABLE = False
 
 # Load servers list from servers.json
@@ -27,26 +34,41 @@ def load_servers() -> list:
     try:
         with open("servers.json") as f:
             data = json.load(f)
-        return data.get("servers", [])
-    except Exception:
+        servers = data.get("servers", [])
+        logger.info(f"Loaded {len(servers)} servers from configuration")
+        return servers
+    except Exception as e:
+        logger.error(f"Failed to load servers: {e}")
         return []
 
 SERVERS = load_servers()
 
 # Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-    st.session_state.last_known_cluster_name = None
-    st.session_state.last_known_cluster_size = None
-    st.session_state.last_known_namespace = None
-    st.session_state.available_servers = SERVERS
+def initialize_session_state():
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+        st.session_state.last_known_cluster_name = None
+        st.session_state.last_known_cluster_size = None
+        st.session_state.last_known_namespace = "default"
+        st.session_state.available_servers = SERVERS
+        st.session_state.conversation_context = {
+            "recent_queries": [],
+            "detected_resources": set(),
+            "cluster_health_status": None,
+            "common_namespaces": ["default", "kube-system"]
+        }
+        st.session_state.error_patterns = {
+            "pending_pods": [],
+            "image_pull_errors": [],
+            "resource_issues": []
+        }
 
-# ---------------- HELPERS ----------------
+# ---------------- IMPROVED HELPERS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
-    """Direct call to MCP server with JSON-RPC payload"""
+    """Enhanced direct call to MCP server with better error handling and logging"""
     payload = {
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": int(time.time() * 1000),
         "method": method,
         "params": params or {}
     }
@@ -57,8 +79,14 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
     }
     
     try:
+        logger.info(f"MCP Call: {method} to {server_url}")
+        start_time = time.time()
+        
         response = requests.post(server_url, json=payload, headers=headers, timeout=timeout)
         response.raise_for_status()
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"MCP Response received in {elapsed_time:.2f}s")
         
         text = response.text.strip()
         
@@ -69,235 +97,364 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
                 if line.startswith('data:'):
                     data_content = line[5:].strip()
                     try:
-                        return json.loads(data_content)
+                        result = json.loads(data_content)
+                        logger.debug(f"SSE response parsed successfully")
+                        return result
                     except json.JSONDecodeError:
+                        logger.warning("SSE response contained non-JSON data")
                         return {"result": data_content}
         
         # Handle regular JSON
         try:
-            return response.json()
+            result = response.json()
+            logger.debug("JSON response parsed successfully")
+            return result
         except json.JSONDecodeError:
+            logger.warning("Response was not valid JSON, returning as text")
             return {"result": text}
             
+    except requests.exceptions.Timeout:
+        error_msg = f"MCP server timeout after {timeout}s"
+        logger.error(error_msg)
+        return {"error": error_msg}
     except requests.exceptions.RequestException as e:
-        return {"error": f"MCP server request failed: {str(e)}"}
+        error_msg = f"MCP server request failed: {str(e)}"
+        logger.error(error_msg)
+        return {"error": error_msg}
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error(error_msg)
+        return {"error": error_msg}
 
-def list_mcp_tools(server_url: str):
-    """Fetch available MCP tools for a specific server."""
+def list_mcp_tools(server_url: str) -> List[Dict[str, Any]]:
+    """Fetch available MCP tools with caching and error handling"""
+    cache_key = f"tools_{server_url}"
+    
+    # Check cache first
+    if hasattr(st.session_state, 'tool_cache'):
+        cached = st.session_state.tool_cache.get(cache_key)
+        if cached and time.time() - cached.get('timestamp', 0) < 300:  # 5 minute cache
+            return cached.get('tools', [])
+    
     resp = direct_mcp_call(server_url, "tools/list")
+    tools = []
+    
     if not isinstance(resp, dict):
-        return []
+        logger.warning(f"Unexpected tools response format: {type(resp)}")
+        return tools
     
     result = resp.get("result", {})
-    if isinstance(result, dict):
-        return result.get("tools", [])
-    if isinstance(result, list):
-        return result
-    if "tools" in resp:
-        return resp["tools"]
     
-    return []
+    # Handle different response formats
+    if isinstance(result, dict):
+        tools = result.get("tools", [])
+    elif isinstance(result, list):
+        tools = result
+    elif "tools" in resp:
+        tools = resp["tools"]
+    
+    # Cache the result
+    if not hasattr(st.session_state, 'tool_cache'):
+        st.session_state.tool_cache = {}
+    st.session_state.tool_cache[cache_key] = {
+        'tools': tools,
+        'timestamp': time.time()
+    }
+    
+    logger.info(f"Found {len(tools)} tools for server {server_url}")
+    return tools
 
-def call_tool(server_url: str, name: str, arguments: dict):
-    """Execute MCP tool by name with arguments."""
+def call_tool(server_url: str, name: str, arguments: dict) -> Dict[str, Any]:
+    """Enhanced tool execution with validation and logging"""
     if not name or not isinstance(arguments, dict):
-        return {"error": "Invalid tool name or arguments"}
+        error_msg = "Invalid tool name or arguments"
+        logger.error(error_msg)
+        return {"error": error_msg}
+    
+    logger.info(f"Calling tool {name} with args: {arguments}")
     return direct_mcp_call(server_url, "tools/call", {
         "name": name,
         "arguments": arguments
     })
 
-def sanitize_args(args: dict, user_query: str = ""):
-    """Fix arguments before sending to MCP tools."""
+def enhanced_sanitize_args(args: dict, user_query: str = "") -> dict:
+    """Intelligent argument sanitization with context awareness"""
     if not args:
         args = {}
 
     fixed = args.copy()
+    query_lower = user_query.lower()
     
-    # Extract namespace from user query if not provided
+    # Update conversation context
+    if user_query:
+        st.session_state.conversation_context["recent_queries"].append(user_query)
+        # Keep only last 10 queries
+        st.session_state.conversation_context["recent_queries"] = \
+            st.session_state.conversation_context["recent_queries"][-10:]
+    
+    # Enhanced namespace detection
     if "namespace" not in fixed and user_query:
-        patterns = [
-            r"in\s+ns\s+(\S+)",
-            r"in\s+namespace\s+(\S+)",
-            r"-n\s+(\S+)",
-            r"(\S+)\s+namespace",
-            r"namespace\s+(\S+)",
+        namespace_patterns = [
+            r"in\s+ns\s+['\"]?(\S+)['\"]?",
+            r"in\s+namespace\s+['\"]?(\S+)['\"]?",
+            r"-n\s+['\"]?(\S+)['\"]?",
+            r"namespace\s+['\"]?(\S+)['\"]?",
+            r"from\s+ns\s+['\"]?(\S+)['\"]?",
+            r"in\s+the\s+(\S+)\s+namespace",
         ]
-        for pattern in patterns:
-            match = re.search(pattern, user_query, re.IGNORECASE)
+        
+        for pattern in namespace_patterns:
+            match = re.search(pattern, query_lower)
             if match:
-                fixed["namespace"] = match.group(1)
+                detected_ns = match.group(1)
+                # Remove trailing punctuation
+                detected_ns = re.sub(r'[.,!?;:]$', '', detected_ns)
+                fixed["namespace"] = detected_ns
+                st.session_state.last_known_namespace = detected_ns
+                logger.info(f"Detected namespace from query: {detected_ns}")
                 break
-
-    # Handle resource/resourceType naming
-    if "resource" in fixed and "resourceType" not in fixed:
-        fixed["resourceType"] = fixed.pop("resource")
     
-    # Handle events
-    if fixed.get("resourceType") == "events":
-        if "namespace" not in fixed:
-            fixed["allNamespaces"] = True
-        elif fixed.get("namespace") == "all":
-            fixed["allNamespaces"] = True
-            fixed.pop("namespace", None)
+    # Use last known namespace if none detected
+    if "namespace" not in fixed and st.session_state.last_known_namespace:
+        fixed["namespace"] = st.session_state.last_known_namespace
     
-    # Set default namespace for pods if not specified
-    elif fixed.get("resourceType") == "pods" and "namespace" not in fixed:
-        fixed["namespace"] = st.session_state.get("last_known_namespace", "default")
-    
-    # Handle "all namespaces" - FIXED: Always show all pods when requested
-    if "all pods" in user_query.lower() or "ella pod" in user_query.lower() or "all namespace" in user_query.lower():
-        fixed["allNamespaces"] = True
-        fixed.pop("namespace", None)
-    
-    # Handle "all namespaces" for any resource
-    elif fixed.get("namespace") == "all":
-        fixed["allNamespaces"] = True
-        fixed.pop("namespace", None)
-    
-    # Handle "all resources"
-    if fixed.get("resourceType") == "all":
-        fixed["allResources"] = True
-        fixed.pop("resourceType", None)
-    
-    # Resource type mappings
+    # Enhanced resource type detection and mapping
     resource_mappings = {
-        "ns": "namespaces",
-        "pod": "pods",
-        "node": "nodes",
-        "deploy": "deployments",
-        "svc": "services",
-        "cm": "configmaps",
-        "secret": "secrets",
-        "event": "events",
-        "ev": "events",
-        "all": "all"
+        "ns": "namespaces", "namespace": "namespaces", "namespaces": "namespaces",
+        "pod": "pods", "pods": "pods", "po": "pods",
+        "node": "nodes", "nodes": "nodes", "no": "nodes",
+        "deploy": "deployments", "deployment": "deployments", "deployments": "deployments",
+        "svc": "services", "service": "services", "services": "services",
+        "cm": "configmaps", "configmap": "configmaps", "configmaps": "configmaps",
+        "secret": "secrets", "secrets": "secrets",
+        "event": "events", "events": "events", "ev": "events",
+        "all": "all", "everything": "all",
+        "ingress": "ingresses", "ingresses": "ingresses", "ing": "ingresses",
+        "pvc": "persistentvolumeclaims", "persistentvolumeclaim": "persistentvolumeclaims",
+        "pv": "persistentvolumes", "persistentvolume": "persistentvolumes",
+        "sa": "serviceaccounts", "serviceaccount": "serviceaccounts",
     }
     
-    if fixed.get("resourceType") in resource_mappings:
-        fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
+    current_resource = fixed.get("resourceType") or fixed.get("resource")
+    if current_resource and current_resource.lower() in resource_mappings:
+        fixed["resourceType"] = resource_mappings[current_resource.lower()]
+        logger.info(f"Mapped resource type: {current_resource} -> {fixed['resourceType']}")
     
+    # Intelligent "all namespaces" detection
+    all_ns_patterns = [
+        r"all\s+namespaces", r"all\s+ns", r"across\s+all\s+namespaces",
+        r"every\s+namespace", r"ella\s+pod", r"all\s+pod",
+        r"in\s+all\s+namespaces", r"from\s+all\s+namespaces"
+    ]
+    
+    if any(re.search(pattern, query_lower) for pattern in all_ns_patterns):
+        fixed["allNamespaces"] = True
+        fixed.pop("namespace", None)
+        logger.info("Enabled allNamespaces based on query pattern")
+    
+    # Handle cluster-wide requests
+    if "cluster" in query_lower and "wide" in query_lower:
+        fixed["allNamespaces"] = True
+    
+    # Handle describe commands specifically
+    if "describe" in query_lower:
+        # Extract resource name for describe commands
+        describe_patterns = [
+            r"describe\s+(\S+)\s+(\S+)",
+            r"describe\s+pod\s+['\"]?(\S+)['\"]?",
+            r"show\s+details\s+of\s+pod\s+['\"]?(\S+)['\"]?",
+        ]
+        
+        for pattern in describe_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                if not fixed.get("name"):
+                    fixed["name"] = match.group(1) if len(match.groups()) == 1 else match.group(2)
+                break
+    
+    # Set intelligent defaults
+    if fixed.get("resourceType") == "pods" and "namespace" not in fixed and "allNamespaces" not in fixed:
+        fixed["namespace"] = st.session_state.last_known_namespace or "default"
+    
+    # Handle output format requests
+    if "wide" in query_lower or "detailed" in query_lower:
+        fixed["output"] = "wide"
+    elif "json" in query_lower or "raw" in query_lower:
+        fixed["output"] = "json"
+    elif "yaml" in query_lower:
+        fixed["output"] = "yaml"
+    
+    logger.debug(f"Sanitized args: {fixed}")
     return fixed
 
-def _extract_json_from_text(text: str) -> Optional[dict]:
-    try:
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        if start != -1 and end != -1 and end > start:
-            json_str = text[start:end]
-            return json.loads(json_str)
-    except Exception:
-        pass
-    return None
-
-def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
+def intelligent_server_selection(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
+    """Enhanced server selection with context awareness"""
     query_lower = query.lower()
     
+    # Check conversation context first
+    recent_queries = st.session_state.conversation_context.get("recent_queries", [])
+    if recent_queries:
+        # If recent queries were about Kubernetes, prefer Kubernetes server
+        k8s_keywords = ["pod", "namespace", "deployment", "service", "kube", "cluster"]
+        if any(any(keyword in q.lower() for keyword in k8s_keywords) for q in recent_queries[-3:]):
+            for server in available_servers:
+                if "kube" in server["name"].lower() or "kubernetes" in server["name"].lower():
+                    logger.info(f"Selected server based on context: {server['name']}")
+                    return server
+    
+    # Keyword-based server selection with scoring
+    server_scores = {}
+    
     for server in available_servers:
+        score = 0
+        server_name_lower = server["name"].lower()
+        server_url_lower = server["url"].lower()
+        
+        # Kubernetes-related queries
+        k8s_keywords = ["pod", "namespace", "deployment", "service", "node", "cluster", 
+                       "kubectl", "k8s", "kubernetes", "secret", "configmap", "event"]
+        if any(keyword in query_lower for keyword in k8s_keywords):
+            if any(kw in server_name_lower for kw in ["kube", "kubernetes", "k8s"]):
+                score += 10
+            elif "jenkins" in server_name_lower or "argo" in server_name_lower:
+                score -= 5
+        
+        # Jenkins-related queries
+        jenkins_keywords = ["jenkins", "job", "build", "pipeline", "ci/cd"]
+        if any(keyword in query_lower for keyword in jenkins_keywords):
+            if "jenkins" in server_name_lower:
+                score += 10
+        
+        # ArgoCD-related queries
+        argocd_keywords = ["argocd", "gitops", "application", "sync", "deploy"]
+        if any(keyword in query_lower for keyword in argocd_keywords):
+            if "argo" in server_name_lower or "gitops" in server_name_lower:
+                score += 10
+        
+        # Exact matches in tool names
         try:
             tools = list_mcp_tools(server["url"])
-            tool_names = [t.get("name", "").lower() for t in tools if t.get("name")]
+            tool_names = [t.get("name", "").lower() for t in tools]
             
             for tool_name in tool_names:
                 if tool_name in query_lower:
-                    return server
-            
-            server_name = server["name"].lower()
-            
-            if (("kubernetes" in query_lower or "k8s" in query_lower or 
-                 "pod" in query_lower or "namespace" in query_lower or
-                 "deployment" in query_lower or "service" in query_lower or
-                 "secret" in query_lower or "configmap" in query_lower or
-                 "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower or "error" in query_lower or
-                 "event" in query_lower or "pending" in query_lower or
-                 "describe" in query_lower) and 
-                ("kubernetes" in server_name or "k8s" in server_name)):
-                return server
+                    score += 15
+                    break
                 
-            if (("jenkins" in query_lower or "job" in query_lower or 
-                 "build" in query_lower or "pipeline" in query_lower) and 
-                "jenkins" in server_name):
-                return server
-                
-            if (("argocd" in query_lower or "application" in query_lower or 
-                 "gitops" in query_lower or "sync" in query_lower) and 
-                "argocd" in server_name):
-                return server
-                
+                # Partial matches
+                for word in query_lower.split():
+                    if word in tool_name and len(word) > 3:
+                        score += 5
+                        break
         except Exception:
-            continue
+            pass
+        
+        server_scores[server["name"]] = score
     
-    return available_servers[0] if available_servers else None
+    # Select server with highest score
+    if server_scores:
+        best_server_name = max(server_scores, key=server_scores.get)
+        if server_scores[best_server_name] > 0:
+            for server in available_servers:
+                if server["name"] == best_server_name:
+                    logger.info(f"Selected server '{server['name']}' with score {server_scores[best_server_name]}")
+                    return server
+    
+    # Fallback to first available server
+    if available_servers:
+        logger.info(f"Using fallback server: {available_servers[0]['name']}")
+        return available_servers[0]
+    
+    return None
 
-def get_all_cluster_resources(server_url: str):
-    resource_types = [
-        "pods", "services", "deployments", "configmaps", 
-        "secrets", "namespaces", "nodes", "events"
-    ]
+# ---------------- ENHANCED RESOURCE FUNCTIONS ----------------
+def get_intelligent_cluster_overview(server_url: str) -> Dict[str, Any]:
+    """Get comprehensive cluster overview with health assessment"""
+    overview = {
+        "cluster_health": "unknown",
+        "resources": {},
+        "issues": [],
+        "recommendations": []
+    }
     
-    all_resources = {}
-    
-    for resource_type in resource_types:
-        try:
-            params = {"resourceType": resource_type}
-            if resource_type == "events":
-                params["allNamespaces"] = True
-            
-            response = call_tool(server_url, "kubectl_get", params)
-            
-            if response and not response.get("error"):
-                result = response.get("result", {})
-                if isinstance(result, dict) and "items" in result:
-                    all_resources[resource_type] = result["items"]
-                else:
-                    all_resources[resource_type] = result
-            else:
-                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
-                
-            time.sleep(0.1)
-            
-        except Exception as e:
-            all_resources[resource_type] = f"Exception: {str(e)}"
-    
-    return all_resources
-
-def get_cluster_events_with_errors(server_url: str):
     try:
-        response = call_tool(server_url, "kubectl_get", {
-            "resourceType": "events",
+        # Get basic cluster info
+        nodes_response = call_tool(server_url, "kubectl_get", {"resourceType": "nodes"})
+        pods_response = call_tool(server_url, "kubectl_get", {
+            "resourceType": "pods", 
             "allNamespaces": True
         })
         
-        if response and not response.get("error"):
-            result = response.get("result", {})
-            events = result.get("items", []) if isinstance(result, dict) else result
+        # Analyze nodes
+        if nodes_response and not nodes_response.get("error"):
+            nodes = nodes_response.get("result", {}).get("items", [])
+            ready_nodes = 0
+            total_nodes = len(nodes)
             
-            error_events = []
-            if isinstance(events, list):
-                for event in events:
-                    if isinstance(event, dict):
-                        event_type = event.get('type', '').lower()
-                        reason = event.get('reason', '').lower()
-                        message = event.get('message', '').lower()
-                        
-                        error_keywords = ['error', 'failed', 'backoff', 'crash', 'unhealthy', 'invalid']
-                        if (event_type == 'error' or 
-                            any(keyword in reason for keyword in error_keywords) or
-                            any(keyword in message for keyword in error_keywords)):
-                            error_events.append(event)
+            for node in nodes:
+                if isinstance(node, dict):
+                    conditions = node.get("status", {}).get("conditions", [])
+                    for condition in conditions:
+                        if (condition.get("type") == "Ready" and 
+                            condition.get("status") == "True"):
+                            ready_nodes += 1
+                            break
             
-            return error_events
-        else:
-            return [{"error": response.get("error", "Failed to retrieve events")}]
+            overview["resources"]["nodes"] = {
+                "total": total_nodes,
+                "ready": ready_nodes,
+                "not_ready": total_nodes - ready_nodes
+            }
             
+            if ready_nodes == total_nodes and total_nodes > 0:
+                overview["cluster_health"] = "healthy"
+            elif ready_nodes > 0:
+                overview["cluster_health"] = "degraded"
+            else:
+                overview["cluster_health"] = "unhealthy"
+        
+        # Analyze pods
+        if pods_response and not pods_response.get("error"):
+            pods = pods_response.get("result", {}).get("items", [])
+            pod_statuses = {}
+            
+            for pod in pods:
+                if isinstance(pod, dict):
+                    status = pod.get("status", {}).get("phase", "Unknown")
+                    pod_statuses[status] = pod_statuses.get(status, 0) + 1
+                    
+                    # Detect issues
+                    if status == "Pending":
+                        overview["issues"].append({
+                            "type": "pending_pod",
+                            "message": f"Pod {pod.get('metadata', {}).get('name')} is pending",
+                            "namespace": pod.get('metadata', {}).get('namespace', 'default')
+                        })
+                    elif status == "Failed":
+                        overview["issues"].append({
+                            "type": "failed_pod", 
+                            "message": f"Pod {pod.get('metadata', {}).get('name')} failed",
+                            "namespace": pod.get('metadata', {}).get('namespace', 'default')
+                        })
+            
+            overview["resources"]["pods"] = pod_statuses
+        
+        # Generate recommendations
+        if overview["cluster_health"] == "unhealthy":
+            overview["recommendations"].append("Check node status and network connectivity")
+        if overview["resources"].get("pods", {}).get("Pending", 0) > 0:
+            overview["recommendations"].append("Investigate pending pods with 'show pending pods'")
+        
+        st.session_state.conversation_context["cluster_health_status"] = overview["cluster_health"]
+        
     except Exception as e:
-        return [{"error": f"Exception while getting events: {str(e)}"}]
+        logger.error(f"Error getting cluster overview: {e}")
+        overview["error"] = str(e)
+    
+    return overview
 
-def get_pending_pods_with_reason(server_url: str):
-    """Get all pending pods and use kubectl_describe to find scheduling reason."""
+def enhanced_pending_pods_analysis(server_url: str) -> List[Dict[str, Any]]:
+    """Enhanced pending pods analysis with intelligent reasoning"""
     try:
         pods_response = call_tool(server_url, "kubectl_get", {
             "resourceType": "pods",
@@ -314,482 +471,774 @@ def get_pending_pods_with_reason(server_url: str):
             if not isinstance(pod, dict):
                 continue
 
-            status = pod.get("status", {})
-            phase = status.get("phase", "")
-            if phase.lower() == "pending":
+            status = pod.get("status", {}).get("phase", "")
+            if status.lower() == "pending":
                 metadata = pod.get("metadata", {})
                 name = metadata.get("name", "unknown")
                 namespace = metadata.get("namespace", "default")
 
-                # Store last known namespace for future queries
+                # Store namespace context
                 st.session_state.last_known_namespace = namespace
 
-                describe_response = call_tool(server_url, "kubectl_describe", {
+                # Enhanced analysis
+                pod_spec = pod.get("spec", {})
+                status_details = pod.get("status", {})
+                
+                # Analyze conditions for more detailed reasoning
+                conditions = status_details.get("conditions", [])
+                events_response = call_tool(server_url, "kubectl_describe", {
                     "resourceType": "pod",
                     "name": name,
                     "namespace": namespace
                 })
 
-                reason = "Unknown reason. Use `kubectl describe pod` for details."
-                if not describe_response.get("error"):
-                    describe_text = describe_response.get("result", "")
+                reason = "Unknown reason"
+                detailed_analysis = ""
+                suggested_fix = ""
+
+                # Analyze common pending reasons
+                if events_response and not events_response.get("error"):
+                    describe_text = events_response.get("result", "")
                     if isinstance(describe_text, str):
-                        events_start = describe_text.find("Events:")
-                        if events_start != -1:
-                            events_text = describe_text[events_start:]
-                            lines = events_text.splitlines()
-                            for line in lines[2:]:
-                                if "Warning" in line or "Failed" in line or "Insufficient" in line:
-                                    reason = line.strip()
-                                    break
+                        # Enhanced pattern matching for common issues
+                        if "Insufficient cpu" in describe_text:
+                            reason = "Insufficient CPU resources"
+                            detailed_analysis = "The cluster doesn't have enough CPU to schedule this pod"
+                            suggested_fix = "Scale up cluster nodes or reduce CPU requests in pod spec"
+                        elif "Insufficient memory" in describe_text:
+                            reason = "Insufficient memory resources"
+                            detailed_analysis = "The cluster doesn't have enough memory to schedule this pod"
+                            suggested_fix = "Add more memory or reduce memory requests in pod spec"
+                        elif "node(s) had taint" in describe_text:
+                            reason = "Node taints preventing scheduling"
+                            detailed_analysis = "No nodes available that match pod's tolerations"
+                            suggested_fix = "Add tolerations to pod spec or remove taints from nodes"
+                        elif "Failed to pull image" in describe_text:
+                            reason = "Image pull failure"
+                            detailed_analysis = "Cannot pull the container image from registry"
+                            suggested_fix = "Check image name, tag, and registry accessibility"
+                        elif "node(s) didn't match Pod's node affinity" in describe_text:
+                            reason = "Node affinity rules not satisfied"
+                            detailed_analysis = "No nodes match the pod's node affinity requirements"
+                            suggested_fix = "Check node labels and pod's node affinity rules"
+                        elif "persistentvolumeclaim" in describe_text.lower():
+                            reason = "PVC binding issues"
+                            detailed_analysis = "Persistent Volume Claim is not bound"
+                            suggested_fix = "Check PVC status and storage class availability"
                         else:
-                            if "Insufficient cpu" in describe_text:
-                                reason = "Insufficient CPU resources in cluster."
-                            elif "Insufficient memory" in describe_text:
-                                reason = "Insufficient memory resources in cluster."
-                            elif "node(s) had taint" in describe_text:
-                                reason = "Node taints prevent scheduling. Check tolerations."
-                            elif "Failed to pull image" in describe_text:
-                                reason = "Image pull failure. Check image name or registry access."
-                            elif "node(s) didn't match Pod's node affinity" in describe_text:
-                                reason = "Pod has node affinity rules that no node satisfies."
+                            # Extract events section for manual analysis
+                            events_start = describe_text.find("Events:")
+                            if events_start != -1:
+                                events_text = describe_text[events_start:]
+                                lines = events_text.split('\n')
+                                for line in lines[1:6]:  # First few event lines
+                                    if line.strip() and "Warning" in line:
+                                        reason = f"Scheduling issue: {line.strip()}"
+                                        break
 
                 pending_pods.append({
                     "name": name,
                     "namespace": namespace,
-                    "reason": reason
+                    "reason": reason,
+                    "detailed_analysis": detailed_analysis,
+                    "suggested_fix": suggested_fix,
+                    "pod_spec": {
+                        "containers": len(pod_spec.get("containers", [])),
+                        "node_selector": pod_spec.get("nodeSelector"),
+                        "tolerations": pod_spec.get("tolerations"),
+                        "resource_requests": pod_spec.get("containers", [{}])[0].get("resources", {})
+                    }
                 })
 
         return pending_pods
 
     except Exception as e:
-        return [{"error": f"Exception while checking pending pods: {str(e)}"}]
+        logger.error(f"Error in pending pods analysis: {e}")
+        return [{"error": f"Analysis failed: {str(e)}"}]
 
-def get_all_pods_all_namespaces(server_url: str):
-    """Get all pods from all namespaces - FIXED VERSION"""
-    try:
-        response = call_tool(server_url, "kubectl_get", {
-            "resourceType": "pods",
-            "allNamespaces": True
-        })
-        
-        if response and not response.get("error"):
-            return response
-        else:
-            return {"error": response.get("error", "Failed to retrieve pods")}
-            
-    except Exception as e:
-        return {"error": f"Exception while getting pods: {str(e)}"}
-
-# ---------------- GEMINI FUNCTIONS ----------------
-def ask_gemini_for_tool_decision(query: str, server_url: str):
+# ---------------- ENHANCED GEMINI FUNCTIONS ----------------
+def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
+    """Enhanced tool selection with better context understanding"""
     tools = list_mcp_tools(server_url)
     tool_names = [t["name"] for t in tools if "name" in t]
 
-    context_notes = ""
-    if st.session_state.last_known_cluster_name:
-        context_notes += f"\nUser previously interacted with cluster: {st.session_state.last_known_cluster_name}"
-    if st.session_state.last_known_cluster_size:
-        context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
-    if st.session_state.last_known_namespace:
-        context_notes += f"\nLast used namespace: {st.session_state.last_known_namespace}"
+    # Build comprehensive context
+    context = {
+        "conversation_history": st.session_state.conversation_context.get("recent_queries", [])[-5:],
+        "last_namespace": st.session_state.last_known_namespace,
+        "cluster_health": st.session_state.conversation_context.get("cluster_health_status"),
+        "available_tools": tool_names,
+        "common_patterns": st.session_state.error_patterns
+    }
 
+    # Enhanced instruction prompt
     instruction = f"""
-You are an AI agent that maps user queries to MCP tools.
-User query: "{query}"
-{context_notes}
+You are an intelligent Kubernetes/Jenkins/ArgoCD assistant. Analyze the user query and select the appropriate tool.
 
-Available tools: {json.dumps(tool_names, indent=2)}
+USER QUERY: "{query}"
 
-Rules:
-- If user says "show me all pods" or "ella pod" or "all pods" → use tool: kubectl_get, args: {{"resourceType": "pods", "allNamespaces": true}}
-- If user says "describe pod X [in ns Y]" → use tool: kubectl_describe, args: {{"name": "X", "namespace": "Y" or last_known_namespace or "default"}}
-- If user asks about "pending pods" → use custom_pending_pods_check
-- If about errors → kubectl_get with resourceType=events, allNamespaces=true
-- Extract namespace from query if possible.
-- If unsure → tool=null, args=null.
+CONTEXT:
+- Recent queries: {context['conversation_history']}
+- Last namespace used: {context['last_namespace']}
+- Cluster health: {context['cluster_health']}
+- Available tools: {', '.join(tool_names)}
 
-Respond ONLY in strict JSON:
-{{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
+INTELLIGENT MAPPING RULES:
+1. CLUSTER HEALTH & DIAGNOSTICS:
+   - "cluster status", "health check", "how's my cluster" → get_intelligent_cluster_overview
+   - "errors", "issues", "problems", "what's wrong" → kubectl_get events + intelligent analysis
+   - "pending pods", "stuck pods" → enhanced_pending_pods_analysis
+
+2. RESOURCE QUERIES:
+   - "all pods", "show pods", "list pods" → kubectl_get pods with allNamespaces if "all" mentioned
+   - "pods in [namespace]" → kubectl_get pods with specific namespace
+   - "describe pod X" → kubectl_describe pod with automatic namespace detection
+   - "get nodes", "cluster nodes" → kubectl_get nodes
+
+3. INTELLIGENT DEFAULTS:
+   - If no namespace specified, use context from recent queries
+   - For "describe" commands, always try to extract resource name
+   - For "get" commands, infer resource type from query
+
+4. COMMAND PATTERNS:
+   - "kubectl get pods -n X" → kubectl_get with namespace X
+   - "kubectl describe pod X" → kubectl_describe with pod X
+   - "show me running services" → kubectl_get services
+
+RESPONSE FORMAT (JSON only):
+{{
+    "tool": "tool_name" | null,
+    "args": {{"arg1": "value1", ...}} | null,
+    "explanation": "Brief reasoning for tool selection",
+    "confidence": 0.0-1.0,
+    "alternative_suggestions": ["suggestion1", "suggestion2"]
+}}
 """
+
+    # Pre-process query for common patterns
+    query_lower = query.lower().strip()
     
-    # FIXED: Handle "all pods" request properly
-    query_lower = query.lower()
-    if "all pods" in query_lower or "ella pod" in query_lower or "all namespace" in query_lower:
-        return {
-            "tool": "kubectl_get",
-            "args": {"resourceType": "pods", "allNamespaces": True},
-            "explanation": "User wants to see all pods across all namespaces"
-        }
+    # High-confidence direct mappings
+    direct_mappings = {
+        "all pods": {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True}},
+        "show pods": {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True}},
+        "list pods": {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True}},
+        "cluster status": {"tool": "get_intelligent_cluster_overview", "args": {}},
+        "pending pods": {"tool": "enhanced_pending_pods_analysis", "args": {}},
+        "get nodes": {"tool": "kubectl_get", "args": {"resourceType": "nodes"}},
+        "cluster nodes": {"tool": "kubectl_get", "args": {"resourceType": "nodes"}},
+    }
     
+    for pattern, mapping in direct_mappings.items():
+        if pattern in query_lower:
+            mapping["args"] = enhanced_sanitize_args(mapping["args"], query)
+            return {
+                "tool": mapping["tool"],
+                "args": mapping["args"],
+                "explanation": f"Direct mapping for '{pattern}'",
+                "confidence": 0.95,
+                "alternative_suggestions": []
+            }
+
     if not GEMINI_AVAILABLE:
-        if "describe pod" in query_lower:
-            parts = query.split()
-            if len(parts) >= 3:
-                name = parts[2]
-                namespace = st.session_state.get("last_known_namespace", "default")
-                for i, part in enumerate(parts):
-                    if part in ["in", "ns", "namespace", "-n"] and i+1 < len(parts):
-                        namespace = parts[i+1]
-                        break
-                return {
-                    "tool": "kubectl_describe",
-                    "args": {"resourceType": "pod", "name": name, "namespace": namespace},
-                    "explanation": f"Describing pod {name} in namespace {namespace}"
-                }
-        if "pending" in query_lower and ("pod" in query_lower or "pods" in query_lower):
-            return {
-                "tool": "custom_pending_pods_check",
-                "args": {},
-                "explanation": "User wants to see pending pods and reasons"
-            }
-        if "error" in query_lower or "issue" in query_lower or "problem" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "events", "allNamespaces": True},
-                "explanation": "User wants to see errors/issues in cluster"
-            }
-        if "pods" in query_lower and "efk" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "namespace": "efk"},
-                "explanation": "User wants to see pods in efk namespace"
-            }
-        if "pods" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods"
-            }
-        else:
-            return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
-    
+        # Enhanced fallback logic
+        return enhanced_fallback_selection(query, server_url)
+
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         response = model.generate_content(instruction)
         text = response.text.strip()
         
-        parsed = None
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = _extract_json_from_text(text)
-        
+        # Parse response
+        parsed = parse_gemini_response(text)
         if not parsed:
-            parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+            return enhanced_fallback_selection(query, server_url)
         
-        parsed["args"] = sanitize_args(parsed.get("args") or {}, query)
+        # Sanitize arguments
+        parsed["args"] = enhanced_sanitize_args(parsed.get("args") or {}, query)
+        
         return parsed
         
     except Exception as e:
-        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+        logger.error(f"Gemini tool selection error: {e}")
+        return enhanced_fallback_selection(query, server_url)
 
-def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
+def parse_gemini_response(text: str) -> Optional[Dict[str, Any]]:
+    """Parse Gemini response with multiple fallback strategies"""
+    # Strategy 1: Direct JSON parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 2: Extract JSON from text
+    json_match = re.search(r'\{[^{}]*\}', text)
+    if json_match:
+        try:
+            return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+    
+    # Strategy 3: Look for code blocks
+    code_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
+    if code_match:
+        try:
+            return json.loads(code_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    
+    logger.warning(f"Could not parse Gemini response: {text[:100]}...")
+    return None
+
+def enhanced_fallback_selection(query: str, server_url: str) -> Dict[str, Any]:
+    """Enhanced fallback when Gemini is unavailable"""
+    query_lower = query.lower()
+    
+    # Simple pattern matching with confidence scoring
+    patterns = [
+        (r"describe pod (\S+)", "kubectl_describe", {"resourceType": "pod", "name": None}, 0.9),
+        (r"pods in namespace (\S+)", "kubectl_get", {"resourceType": "pods", "namespace": None}, 0.8),
+        (r"show me (\S+) in (\S+)", "kubectl_get", {"resourceType": None, "namespace": None}, 0.7),
+        (r"get (\S+)", "kubectl_get", {"resourceType": None}, 0.6),
+        (r"list (\S+)", "kubectl_get", {"resourceType": None}, 0.6),
+    ]
+    
+    for pattern, tool, args, confidence in patterns:
+        match = re.search(pattern, query_lower)
+        if match:
+            groups = match.groups()
+            if tool == "kubectl_describe" and len(groups) >= 1:
+                args["name"] = groups[0]
+            elif tool == "kubectl_get" and "namespace" in args and len(groups) >= 2:
+                args["resourceType"] = groups[0]
+                args["namespace"] = groups[1]
+            elif tool == "kubectl_get" and "resourceType" in args and len(groups) >= 1:
+                args["resourceType"] = groups[0]
+            
+            args = enhanced_sanitize_args(args, query)
+            return {
+                "tool": tool,
+                "args": args,
+                "explanation": f"Pattern match: {pattern}",
+                "confidence": confidence,
+                "alternative_suggestions": []
+            }
+    
+    # Default fallback
+    return {
+        "tool": None,
+        "args": None,
+        "explanation": "Could not determine appropriate tool",
+        "confidence": 0.0,
+        "alternative_suggestions": ["Try being more specific about what you want to see"]
+    }
+
+def generate_intelligent_response(user_input: str, raw_response: dict, tool_used: str = None) -> str:
+    """Generate intelligent, context-aware responses"""
     if not GEMINI_AVAILABLE:
-        return generate_fallback_answer(user_input, raw_response)
+        return generate_enhanced_fallback_response(user_input, raw_response, tool_used)
 
     try:
-        context_notes = ""
-        if st.session_state.last_known_cluster_name:
-            context_notes += f"\nPreviously known cluster: {st.session_state.last_known_cluster_name}"
-        if st.session_state.last_known_cluster_size:
-            context_notes += f"\nPreviously known size: {st.session_state.last_known_cluster_size} nodes"
-        if st.session_state.last_known_namespace:
-            context_notes += f"\nLast used namespace: {st.session_state.last_known_namespace}"
+        # Build comprehensive context
+        context = {
+            "user_query": user_input,
+            "tool_used": tool_used,
+            "conversation_history": st.session_state.conversation_context.get("recent_queries", [])[-3:],
+            "last_namespace": st.session_state.last_known_namespace,
+            "cluster_health": st.session_state.conversation_context.get("cluster_health_status"),
+            "raw_data": raw_response
+        }
+
+        prompt = f"""
+You are an expert Kubernetes/Jenkins/ArgoCD administrator. Provide a helpful, accurate response.
+
+USER QUESTION: {user_input}
+TOOL USED: {tool_used}
+CONTEXT: {json.dumps(context, indent=2)}
+
+RESPONSE GUIDELINES:
+1. BE PRECISE & TECHNICAL: Provide exact information from the data
+2. BE HELPFUL: Suggest next steps or explanations for issues
+3. BE CONCISE: Avoid unnecessary information
+4. USE EMOJIS: Appropriately for status (✅, ⚠️, ❌, 🔍, etc.)
+5. FORMAT WELL: Use bullet points, code blocks, and clear sections
+6. PROVIDE CONTEXT: Relate to previous queries when relevant
+
+SPECIAL CASES:
+- For errors: Explain what went wrong and suggest fixes
+- For empty results: Suggest what to check next
+- For cluster issues: Provide remediation steps
+- For describe commands: Highlight key events and status
+
+Respond in clear, professional English:
+"""
 
         model = genai.GenerativeModel(GEMINI_MODEL)
-        prompt = (
-            f"User asked: {user_input}\n"
-            f"Context: {context_notes}\n\n"
-            f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
-            "INSTRUCTIONS:\n"
-            "- Respond in clear, natural, conversational English.\n"
-            "- If showing all pods, list them clearly with namespace and status.\n"
-            "- If describing a pod, show Events section if available.\n"
-            "- If pending pods → show name, namespace, reason, and fix advice.\n"
-            "- If pod not found → say 'Pod not found' and suggest checking name/namespace.\n"
-            "- NEVER show raw JSON or errors unless asked.\n"
-            "- Be helpful, precise, and friendly."
-        )
-        
-        resp = model.generate_content(prompt)
-        answer = getattr(resp, "text", str(resp)).strip()
+        response = model.generate_content(prompt)
+        answer = getattr(response, "text", str(response)).strip()
 
-        extract_and_store_cluster_info(user_input, answer)
+        # Extract and store contextual information
+        update_conversation_context(user_input, answer, raw_response)
 
         return answer
 
     except Exception as e:
-        return generate_fallback_answer(user_input, raw_response)
+        logger.error(f"Error generating intelligent response: {e}")
+        return generate_enhanced_fallback_response(user_input, raw_response, tool_used)
 
-def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
+def generate_enhanced_fallback_response(user_input: str, raw_response: dict, tool_used: str = None) -> str:
+    """Enhanced fallback response generation"""
+    user_input_lower = user_input.lower()
+    
+    # Handle errors
     if "error" in raw_response:
         error_msg = raw_response["error"]
         if "not found" in error_msg.lower():
-            return "Pod or resource not found. Please double-check the name and namespace. You can list pods with `kubectl get pods -n <namespace>`."
-        return f"Sorry, I encountered an issue: {error_msg}"
+            return "❌ Resource not found. Please verify the name and namespace. You can list available resources with `kubectl get <resource-type> -n <namespace>`."
+        elif "timeout" in error_msg.lower():
+            return "⏰ Request timeout. The cluster might be under heavy load or there might be network issues."
+        return f"❌ Error: {error_msg}"
 
     result = raw_response.get("result", {})
+    
+    # Handle different tool responses intelligently
+    if tool_used == "kubectl_get":
+        return format_kubectl_get_response(result, user_input)
+    elif tool_used == "kubectl_describe":
+        return format_describe_response(result, user_input)
+    elif tool_used == "enhanced_pending_pods_analysis":
+        return format_pending_pods_response(result)
+    elif tool_used == "get_intelligent_cluster_overview":
+        return format_cluster_overview_response(result)
+    
+    # Default formatting
+    if isinstance(result, dict) and "items" in result:
+        return format_resource_list(result["items"], user_input)
+    
+    return f"✅ Operation completed:\n```json\n{json.dumps(result, indent=2)}\n```"
 
-    # FIXED: Handle all pods response properly
-    user_input_lower = user_input.lower()
-    if ("all pods" in user_input_lower or "ella pod" in user_input_lower or 
-        "all namespace" in user_input_lower) and isinstance(result, dict):
+def format_kubectl_get_response(result: Any, user_input: str) -> str:
+    """Format kubectl get responses intelligently"""
+    if isinstance(result, dict) and "items" in result:
+        items = result["items"]
+        if not items:
+            return "📭 No resources found."
         
-        if "items" in result:
-            pods = result["items"]
-            if isinstance(pods, list) and len(pods) > 0:
-                pod_list = []
-                for pod in pods:
-                    if isinstance(pod, dict):
-                        name = pod.get("metadata", {}).get("name", "unknown")
-                        namespace = pod.get("metadata", {}).get("namespace", "default")
-                        status = pod.get("status", {}).get("phase", "Unknown")
-                        pod_list.append(f"• `{name}` in `{namespace}` → **{status}**")
-                
-                if pod_list:
-                    return f"📋 Found {len(pod_list)} pods across all namespaces:\n\n" + "\n".join(pod_list)
-                else:
-                    return "No pods found in any namespace."
-            else:
-                return "No pods found in the cluster."
-        else:
-            return "Unable to retrieve pod information. Please try again."
+        resource_type = "resources"
+        if "pod" in user_input:
+            resource_type = "pods"
+            return format_pod_list(items)
+        elif "node" in user_input:
+            resource_type = "nodes"
+            return format_node_list(items)
+        elif "service" in user_input or "svc" in user_input:
+            resource_type = "services"
+        elif "namespace" in user_input or "ns" in user_input:
+            resource_type = "namespaces"
+            return format_namespace_list(items)
+        
+        return f"📋 Found {len(items)} {resource_type}."
+    
+    return f"✅ Response:\n```\n{str(result)[:500]}\n```"
 
-    # Handle pending pods
-    if isinstance(result, list) and len(result) > 0 and "name" in result[0] and "reason" in result[0]:
-        count = len(result)
-        if count == 0:
-            return "No pending pods found. All pods are running normally."
+def format_pod_list(pods: List[Dict]) -> str:
+    """Format pod list with intelligent grouping"""
+    if not pods:
+        return "📭 No pods found."
+    
+    grouped = {}
+    for pod in pods:
+        if isinstance(pod, dict):
+            namespace = pod.get("metadata", {}).get("namespace", "default")
+            status = pod.get("status", {}).get("phase", "Unknown")
+            
+            if namespace not in grouped:
+                grouped[namespace] = {}
+            if status not in grouped[namespace]:
+                grouped[namespace][status] = []
+            
+            grouped[namespace][status].append(pod.get("metadata", {}).get("name", "unknown"))
+    
+    lines = [f"📊 Found {len(pods)} pods across {len(grouped)} namespaces:"]
+    
+    for namespace, statuses in grouped.items():
+        lines.append(f"\n**Namespace: {namespace}**")
+        for status, pod_names in statuses.items():
+            status_emoji = "✅" if status == "Running" else "⚠️" if status == "Pending" else "❌"
+            lines.append(f"  {status_emoji} {status}: {len(pod_names)} pods")
+            if len(pod_names) <= 5:  # Show names for small lists
+                for name in pod_names:
+                    lines.append(f"    • {name}")
+    
+    return "\n".join(lines)
 
-        lines = [f"✅ I found {count} pending pod(s):"]
-        for pod in result:
-            name = pod.get("name", "unknown")
-            ns = pod.get("namespace", "default")
-            reason = pod.get("reason", "Unknown reason")
-
-            lines.append(f"\n🔹 Pod: `{name}`\n   Namespace: `{ns}`\n   Reason: {reason}")
-
-            fix = ""
-            if "Insufficient cpu" in reason:
-                fix = "💡 **Fix**: Scale up cluster nodes or reduce CPU `requests` in pod spec."
-            elif "Insufficient memory" in reason:
-                fix = "💡 **Fix**: Add more memory or reduce memory `requests`."
-            elif "node(s) had taint" in reason:
-                fix = "💡 **Fix**: Add `tolerations` to pod spec or remove taints from nodes."
-            elif "Failed to pull image" in reason:
-                fix = "💡 **Fix**: Verify image name/tag and registry access. Does `docker pull` work?"
-            elif "node affinity" in reason:
-                fix = "💡 **Fix**: Check node labels match pod's `nodeAffinity` rules."
-            else:
-                fix = f"💡 **Fix**: Run `kubectl describe pod {name} -n {ns}` for detailed events."
-
-            lines.append(fix)
-
-        return "\n".join(lines)
-
-    # Handle kubectl_describe output
-    if isinstance(result, str) and ("Events:" in result or "Name:" in result):
-        ns_match = re.search(r"Namespace:\s*(\S+)", result)
-        if ns_match:
-            st.session_state.last_known_namespace = ns_match.group(1)
-
-        if "not found" in result.lower():
-            return "❌ Pod not found. Please verify the pod name and namespace."
-
-        return f"```\n{result.strip()}\n```"
-
-    # Existing logic for events, nodes, etc.
-    if isinstance(result, dict):
-        if "items" in result:
-            items = result["items"]
-            count = len(items)
-
-            if "event" in user_input.lower() or "error" in user_input.lower():
-                if items:
-                    error_count = 0
-                    error_details = []
-                    for item in items:
-                        if isinstance(item, dict):
-                            event_type = item.get('type', '').lower()
-                            reason = item.get('reason', '')
-                            message = item.get('message', '')
-                            namespace = item.get('metadata', {}).get('namespace', 'default')
-                            if event_type == 'error' or 'error' in reason.lower() or 'fail' in reason.lower():
-                                error_count += 1
-                                error_details.append(f"• **{namespace}**: {reason} - {message}")
-                    if error_count > 0:
-                        return f"⚠️ Found {error_count} error events:\n\n" + "\n".join(error_details)
-                    else:
-                        return "✅ No error events found. Cluster is healthy!"
-                else:
-                    return "No events found."
-
-            if "pod" in user_input.lower() and isinstance(items, list):
-                pods = []
-                for item in items:
-                    if isinstance(item, dict):
-                        name = item.get("metadata", {}).get("name", "unnamed")
-                        ns = item.get("metadata", {}).get("namespace", "default")
-                        phase = item.get("status", {}).get("phase", "Unknown")
-                        pods.append(f"• `{name}` in `{ns}` → **{phase}**")
-                        if phase == "Pending":
-                            st.session_state.last_known_namespace = ns
-                if pods:
-                    return f"📋 Found {count} pod(s):\n" + "\n".join(pods)
-                else:
-                    return "No pods found."
-
-    if result:
-        return f"✅ Operation completed: {json.dumps(result, indent=2)}"
-
-    return "✅ Done."
-
-def extract_and_store_cluster_info(user_input: str, answer: str):
+def update_conversation_context(user_input: str, response: str, raw_data: dict):
+    """Update conversation context with intelligent information extraction"""
     try:
-        if "cluster name" in user_input.lower():
-            patterns = [
-                r"cluster[^\w]*([\w-]+)",
-                r"name[^\w][:\-]?[^\w]([\w-]+)",
-                r"\*([\w-]+)\*",
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, answer, re.IGNORECASE)
-                if match:
-                    cluster_name = match.group(1).strip()
-                    st.session_state.last_known_cluster_name = cluster_name
-                    break
-
-        if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
-            numbers = re.findall(r'\b\d+\b', answer)
-            if numbers:
-                st.session_state.last_known_cluster_size = int(numbers[0])
-
-        if "namespace" in user_input.lower():
-            ns_match = re.search(r"namespace[^\w]*([\w-]+)", answer, re.IGNORECASE)
-            if ns_match:
-                st.session_state.last_known_namespace = ns_match.group(1).strip()
-
-    except Exception:
-        pass
+        # Extract namespace mentions
+        ns_matches = re.findall(r"namespace[:\s]*['\"]?(\S+)['\"]?", response, re.IGNORECASE)
+        if ns_matches:
+            st.session_state.last_known_namespace = ns_matches[0]
+        
+        # Extract cluster information
+        if "cluster" in user_input.lower():
+            name_match = re.search(r"cluster[:\s]*['\"]?(\S+)['\"]?", response, re.IGNORECASE)
+            if name_match:
+                st.session_state.last_known_cluster_name = name_match.group(1)
+            
+            size_match = re.search(r"(\d+)\s+node", response, re.IGNORECASE)
+            if size_match:
+                st.session_state.last_known_cluster_size = int(size_match.group(1))
+        
+        # Update detected resources
+        resource_types = ["pod", "service", "deployment", "node", "namespace"]
+        for resource in resource_types:
+            if resource in user_input.lower():
+                st.session_state.conversation_context["detected_resources"].add(resource)
+        
+        # Keep sets manageable
+        if len(st.session_state.conversation_context["detected_resources"]) > 10:
+            st.session_state.conversation_context["detected_resources"] = set(
+                list(st.session_state.conversation_context["detected_resources"])[-10:]
+            )
+            
+    except Exception as e:
+        logger.warning(f"Context update error: {e}")
 
 # ---------------- STREAMLIT APP ----------------
 def main():
-    st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 MaSaOps Bot")
+    st.set_page_config(
+        page_title="🤖 MaSaOps Bot - Intelligent Kubernetes Assistant", 
+        page_icon="⚡", 
+        layout="wide"
+    )
+    
+    # Initialize session state
+    initialize_session_state()
+    
+    st.title("🤖 MaSaOps Bot - Intelligent Kubernetes Assistant")
+    st.markdown("### Your AI-powered Kubernetes, Jenkins, and ArgoCD expert")
 
+    # Sidebar with enhanced information
     with st.sidebar:
-        st.header("⚙️ Settings")
-        if st.button("Discover Available Servers"):
-            with st.spinner("Discovering MCP servers..."):
-                st.success(f"Found {len(SERVERS)} servers")
-                for server in SERVERS:
-                    st.write(f"• {server['name']}: {server['url']}")
-        st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
-        if st.button("Clear Chat History"):
+        st.header("⚙️ Intelligent Settings")
+        
+        # Server status
+        st.subheader("🔌 Connected Servers")
+        for server in st.session_state.available_servers:
+            status = "✅" if server.get("enabled", True) else "❌"
+            st.write(f"{status} **{server['name']}**")
+        
+        # Cluster context
+        st.subheader("📊 Cluster Context")
+        if st.session_state.last_known_cluster_name:
+            st.write(f"**Cluster:** {st.session_state.last_known_cluster_name}")
+        if st.session_state.last_known_cluster_size:
+            st.write(f"**Nodes:** {st.session_state.last_known_cluster_size}")
+        if st.session_state.last_known_namespace:
+            st.write(f"**Namespace:** {st.session_state.last_known_namespace}")
+        
+        # Quick actions
+        st.subheader("🚀 Quick Actions")
+        if st.button("🔄 Refresh Cluster Info"):
+            with st.spinner("Getting cluster overview..."):
+                if st.session_state.available_servers:
+                    server = intelligent_server_selection("cluster status", st.session_state.available_servers)
+                    if server:
+                        overview = get_intelligent_cluster_overview(server["url"])
+                        st.success(f"Cluster health: {overview.get('cluster_health', 'unknown')}")
+        
+        if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
-            st.session_state.last_known_namespace = None
             st.rerun()
+        
+        # Diagnostics
+        st.subheader("🔍 Diagnostics")
+        st.write(f"🤖 Gemini AI: {'✅ Available' if GEMINI_AVAILABLE else '❌ Unavailable'}")
+        st.write(f"💬 Messages: {len(st.session_state.messages)}")
 
-    st.subheader("What's on your mind today? 🤔")
+    # Main chat interface
+    st.subheader("💬 Chat with MaSaOps Bot")
+    st.markdown("Ask about pods, nodes, deployments, cluster health, or any Kubernetes resources!")
 
+    # Display chat history
     for msg in st.session_state.messages:
         role = msg.get("role", "assistant")
         with st.chat_message(role):
             st.markdown(msg.get("content", ""))
+            if msg.get("metadata"):
+                with st.expander("📊 Response Details"):
+                    st.json(msg.get("metadata"))
 
+    # Chat input
     user_prompt = st.chat_input("Ask anything about your infrastructure...")
     if not user_prompt:
         return
 
+    # Add user message to history
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    with st.spinner("🔍 Finding the right server for your query..."):
-        selected_server = detect_server_from_query(user_prompt, SERVERS)
+    # Process the query
+    try:
+        # Step 1: Intelligent server selection
+        with st.spinner("🔍 Finding the best server for your query..."):
+            selected_server = intelligent_server_selection(user_prompt, st.session_state.available_servers)
 
-    if not selected_server:
-        error_msg = "No MCP servers available. Please check your servers.json file."
+        if not selected_server:
+            error_msg = "❌ No suitable servers available. Please check your servers configuration."
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            with st.chat_message("assistant"):
+                st.error(error_msg)
+            return
+
+        # Show server info
+        server_info = f"🤖 **Using server:** {selected_server['name']}"
+        st.session_state.messages.append({"role": "assistant", "content": server_info})
+        with st.chat_message("assistant"):
+            st.markdown(server_info)
+
+        # Step 2: Intelligent tool selection
+        with st.spinner("🤔 Analyzing your request with AI..."):
+            decision = intelligent_tool_selection(user_prompt, selected_server["url"])
+
+        # Show decision explanation
+        explanation = decision.get("explanation", "Analyzing your request...")
+        confidence = decision.get("confidence", 0)
+        explanation_msg = f"💡 {explanation} (Confidence: {confidence:.0%})"
+        
+        st.session_state.messages.append({"role": "assistant", "content": explanation_msg})
+        with st.chat_message("assistant"):
+            st.markdown(explanation_msg)
+
+        # Step 3: Execute tool if available
+        tool_name = decision.get("tool")
+        tool_args = decision.get("args") or {}
+
+        if tool_name:
+            with st.chat_message("assistant"):
+                st.markdown(f"🔧 Executing `{tool_name}`...")
+
+            # Execute the appropriate tool
+            if tool_name == "enhanced_pending_pods_analysis":
+                with st.spinner("🔍 Performing intelligent pending pods analysis..."):
+                    result = enhanced_pending_pods_analysis(selected_server["url"])
+                    resp = {"result": result}
+            elif tool_name == "get_intelligent_cluster_overview":
+                with st.spinner("🔄 Gathering comprehensive cluster overview..."):
+                    result = get_intelligent_cluster_overview(selected_server["url"])
+                    resp = {"result": result}
+            else:
+                with st.spinner(f"🔄 Executing {tool_name}..."):
+                    resp = call_tool(selected_server["url"], tool_name, tool_args)
+
+            # Step 4: Generate intelligent response
+            with st.spinner("📝 Crafting intelligent response..."):
+                final_answer = generate_intelligent_response(user_prompt, resp, tool_name)
+
+            # Store and display response
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": final_answer,
+                "metadata": {"tool_used": tool_name, "args": tool_args}
+            })
+            with st.chat_message("assistant"):
+                st.markdown(final_answer)
+
+        else:
+            # No tool selected - provide helpful guidance
+            helpful_response = generate_helpful_guidance(user_prompt)
+            
+            st.session_state.messages.append({"role": "assistant", "content": helpful_response})
+            with st.chat_message("assistant"):
+                st.markdown(helpful_response)
+
+    except Exception as e:
+        error_msg = f"❌ Sorry, I encountered an unexpected error: {str(e)}"
+        logger.error(f"Main processing error: {e}")
         st.session_state.messages.append({"role": "assistant", "content": error_msg})
         with st.chat_message("assistant"):
             st.error(error_msg)
-        return
 
-    server_info = f"🤖 Using server: **{selected_server['name']}**"
-    st.session_state.messages.append({"role": "assistant", "content": server_info})
-    with st.chat_message("assistant"):
-        st.markdown(server_info)
+def generate_helpful_guidance(query: str) -> str:
+    """Generate helpful guidance when no specific tool is selected"""
+    query_lower = query.lower()
+    
+    guidance = "🤔 I want to help you! Here are some things you can ask me:\n\n"
+    
+    categories = {
+        "🔍 **Cluster Diagnostics**:": [
+            "Show cluster health status",
+            "Check for pending pods",
+            "Show cluster events with errors",
+            "Get node status",
+            "Check resource usage"
+        ],
+        "📊 **Resource Information**:": [
+            "Show all pods [in namespace X]",
+            "List services/deployments/configmaps",
+            "Describe pod [name]",
+            "Show pods in efk namespace",
+            "Get all resources in cluster"
+        ],
+        "⚡ **Quick Commands**:": [
+            "kubectl get pods -A",
+            "kubectl describe pod my-pod",
+            "kubectl get nodes",
+            "kubectl get events -A"
+        ],
+        "🔧 **Troubleshooting**:": [
+            "Why are pods pending?",
+            "Show me any errors",
+            "What's wrong with my cluster?",
+            "Check image pull issues"
+        ]
+    }
+    
+    for category, examples in categories.items():
+        guidance += f"{category}\n"
+        for example in examples:
+            guidance += f"  • {example}\n"
+        guidance += "\n"
+    
+    guidance += "💡 **Pro Tip**: Be specific! Instead of 'show pods', try 'show running pods in default namespace'"
+    
+    return guidance
 
-    with st.spinner("🤔 Analyzing your request..."):
-        decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
+# Add missing formatting functions
+def format_node_list(nodes):
+    """Format node list response"""
+    if not nodes:
+        return "📭 No nodes found."
+    
+    ready_nodes = 0
+    node_info = []
+    
+    for node in nodes:
+        if isinstance(node, dict):
+            name = node.get("metadata", {}).get("name", "unknown")
+            conditions = node.get("status", {}).get("conditions", [])
+            is_ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+            
+            if is_ready:
+                ready_nodes += 1
+                status = "✅ Ready"
+            else:
+                status = "❌ Not Ready"
+            
+            node_info.append(f"  • {name} - {status}")
+    
+    return f"🖥️ **Nodes Overview** ({ready_nodes}/{len(nodes)} ready):\n" + "\n".join(node_info)
 
-    explanation = decision.get("explanation", "I'm figuring out how to help you...")
-    st.session_state.messages.append({"role": "assistant", "content": f"💡 {explanation}"})
-    with st.chat_message("assistant"):
-        st.markdown(f"💡 {explanation}")
+def format_namespace_list(namespaces):
+    """Format namespace list response"""
+    if not namespaces:
+        return "📭 No namespaces found."
+    
+    namespace_names = []
+    for ns in namespaces:
+        if isinstance(ns, dict):
+            name = ns.get("metadata", {}).get("name", "unknown")
+            status = ns.get("status", {}).get("phase", "Active")
+            namespace_names.append(f"  • {name} - {status}")
+    
+    return f"📁 **Namespaces** ({len(namespaces)} total):\n" + "\n".join(namespace_names)
 
-    tool_name = decision.get("tool")
-    tool_args = decision.get("args") or {}
+def format_pending_pods_response(pods):
+    """Format pending pods response"""
+    if not pods:
+        return "✅ No pending pods found. All pods are running normally!"
+    
+    if isinstance(pods, list) and pods and "error" in pods[0]:
+        return f"❌ Error analyzing pending pods: {pods[0]['error']}"
+    
+    response = [f"⚠️ **Pending Pods Analysis** ({len(pods)} found):\n"]
+    
+    for pod in pods:
+        if isinstance(pod, dict) and "name" in pod:
+            response.append(f"\n🔸 **Pod:** {pod['name']}")
+            response.append(f"   **Namespace:** {pod.get('namespace', 'default')}")
+            response.append(f"   **Reason:** {pod.get('reason', 'Unknown')}")
+            
+            if pod.get("detailed_analysis"):
+                response.append(f"   **Analysis:** {pod['detailed_analysis']}")
+            if pod.get("suggested_fix"):
+                response.append(f"   **Suggested Fix:** {pod['suggested_fix']}")
+    
+    return "\n".join(response)
 
-    if tool_name:
-        with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}`...")
+def format_cluster_overview_response(overview):
+    """Format cluster overview response"""
+    if not overview or "error" in overview:
+        return "❌ Could not retrieve cluster overview."
+    
+    response = ["🏥 **Cluster Health Overview**\n"]
+    
+    # Health status
+    health = overview.get("cluster_health", "unknown")
+    health_emoji = "✅" if health == "healthy" else "⚠️" if health == "degraded" else "❌"
+    response.append(f"{health_emoji} **Status:** {health.title()}\n")
+    
+    # Resources summary
+    resources = overview.get("resources", {})
+    if "nodes" in resources:
+        nodes = resources["nodes"]
+        response.append(f"🖥️ **Nodes:** {nodes.get('ready', 0)}/{nodes.get('total', 0)} ready")
+    
+    if "pods" in resources:
+        pods = resources["pods"]
+        total_pods = sum(pods.values())
+        response.append(f"📦 **Pods:** {total_pods} total")
+        for status, count in pods.items():
+            emoji = "✅" if status == "Running" else "⚠️" if status == "Pending" else "❌"
+            response.append(f"  {emoji} {status}: {count}")
+    
+    # Issues
+    issues = overview.get("issues", [])
+    if issues:
+        response.append(f"\n⚠️ **Issues Found:** {len(issues)}")
+        for issue in issues[:3]:  # Show first 3 issues
+            response.append(f"  • {issue.get('message', 'Unknown issue')}")
+    
+    # Recommendations
+    recommendations = overview.get("recommendations", [])
+    if recommendations:
+        response.append(f"\n💡 **Recommendations:**")
+        for rec in recommendations:
+            response.append(f"  • {rec}")
+    
+    return "\n".join(response)
 
-        if tool_name == "custom_pending_pods_check":
-            with st.spinner("🔍 Scanning for pending pods and reasons..."):
-                pending_pods = get_pending_pods_with_reason(selected_server["url"])
-                resp = {"result": pending_pods}
-        elif ("error" in user_prompt.lower() or "issue" in user_prompt.lower() or 
-              "problem" in user_prompt.lower() or "show me any errors" in user_prompt.lower()):
-            with st.spinner("🔍 Scanning for errors in cluster events..."):
-                error_events = get_cluster_events_with_errors(selected_server["url"])
-                resp = {"result": {"items": error_events}}
-        elif (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-              ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
-            with st.spinner("🔄 Gathering all cluster resources..."):
-                all_resources = get_all_cluster_resources(selected_server["url"])
-                resp = {"result": all_resources}
-        else:
-            with st.spinner("🔄 Processing your request..."):
-                resp = call_tool(selected_server["url"], tool_name, tool_args)
-
-        with st.spinner("📝 Formatting response..."):
-            final_answer = ask_gemini_answer(user_prompt, resp)
-
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
-        with st.chat_message("assistant"):
-            st.markdown(final_answer)
-
-    else:
-        helpful_response = (
-            "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
-            "**For Kubernetes:**\n"
-            "- \"List all namespaces\"\n"
-            "- \"Show all pods\" or \"Show me all pods\"\n"  # FIXED: Added clear instruction
-            "- \"Show running pods\"\n"
-            "- \"Get cluster nodes\"\n"
-            "- \"Show all services\"\n"
-            "- \"List all secrets\"\n"
-            "- \"Show errors in cluster\"\n"
-            "- \"Check cluster events\"\n"
-            "- \"Show all resources in cluster\"\n"
-            "- \"Show pending pods and reasons\"\n"
-            "- \"Describe pod <name> in namespace <ns>\"\n\n"
-            "**Examples:**\n"
-            "  • `show me all pods`\n"
-            "  • `describe pod my-pod dev`\n"
-            "  • `show pods in efk namespace`\n"
-            "  • `kubectl describe pod my-pod -n prod`\n\n"
-            "**For Jenkins/ArgoCD:**\n"
-            "- \"List all jobs\"\n"
-            "- \"List applications\"\n\n"
-            "Or try being more specific!"
-        )
+def format_describe_response(result, user_input):
+    """Format describe command responses"""
+    if isinstance(result, str):
+        if "not found" in result.lower():
+            return "❌ Resource not found. Please check the name and namespace."
         
-        st.session_state.messages.append({"role": "assistant", "content": helpful_response})
-        with st.chat_message("assistant"):
-            st.markdown(helpful_response)
+        # Extract key information for better presentation
+        lines = result.split('\n')
+        key_sections = []
+        current_section = []
+        
+        for line in lines:
+            if line.strip() and not line.startswith(' ') and ':' in line:
+                if current_section:
+                    key_sections.append('\n'.join(current_section))
+                    current_section = []
+            current_section.append(line)
+        
+        if current_section:
+            key_sections.append('\n'.join(current_section))
+        
+        response = ["🔍 **Detailed Description**\n"]
+        response.append("```")
+        response.append(result[:2000])  # Limit output size
+        response.append("```")
+        
+        return '\n'.join(response)
+    
+    return f"```\n{str(result)}\n```"
 
 if __name__ == "__main__":
     main()
