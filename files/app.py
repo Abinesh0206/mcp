@@ -124,12 +124,21 @@ def sanitize_args(args: dict):
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
     
+    # Handle events specifically - they need namespace handling
+    if fixed.get("resourceType") == "events":
+        if "namespace" not in fixed:
+            # For events, if no namespace specified, get all namespaces
+            fixed["allNamespaces"] = True
+        elif fixed.get("namespace") == "all":
+            fixed["allNamespaces"] = True
+            fixed.pop("namespace", None)
+    
     # Set default namespace for pods if not specified
-    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
+    elif fixed.get("resourceType") == "pods" and "namespace" not in fixed:
         fixed["namespace"] = "default"
     
-    # Handle "all namespaces" request
-    if fixed.get("namespace") == "all":
+    # Handle "all namespaces" request for other resources
+    elif fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
     
@@ -147,6 +156,8 @@ def sanitize_args(args: dict):
         "svc": "services",
         "cm": "configmaps",
         "secret": "secrets",
+        "event": "events",
+        "ev": "events",
         "all": "all"
     }
     
@@ -192,7 +203,8 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                  "deployment" in query_lower or "service" in query_lower or
                  "secret" in query_lower or "configmap" in query_lower or
                  "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower) and 
+                 "resource" in query_lower or "error" in query_lower or
+                 "event" in query_lower) and 
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
@@ -218,17 +230,20 @@ def get_all_cluster_resources(server_url: str):
     """Get all resources in the cluster by querying multiple resource types."""
     resource_types = [
         "pods", "services", "deployments", "configmaps", 
-        "secrets", "namespaces", "nodes"
+        "secrets", "namespaces", "nodes", "events"
     ]
     
     all_resources = {}
     
     for resource_type in resource_types:
         try:
-            response = call_tool(server_url, "kubectl_get", {
-                "resourceType": resource_type,
-                "allNamespaces": True
-            })
+            params = {"resourceType": resource_type}
+            
+            # Special handling for events - get from all namespaces
+            if resource_type == "events":
+                params["allNamespaces"] = True
+            
+            response = call_tool(server_url, "kubectl_get", params)
             
             if response and not response.get("error"):
                 result = response.get("result", {})
@@ -246,6 +261,43 @@ def get_all_cluster_resources(server_url: str):
             all_resources[resource_type] = f"Exception: {str(e)}"
     
     return all_resources
+
+def get_cluster_events_with_errors(server_url: str):
+    """Specifically get events that indicate errors in the cluster."""
+    try:
+        # Get events from all namespaces
+        response = call_tool(server_url, "kubectl_get", {
+            "resourceType": "events",
+            "allNamespaces": True
+        })
+        
+        if response and not response.get("error"):
+            result = response.get("result", {})
+            events = result.get("items", []) if isinstance(result, dict) else result
+            
+            # Filter for error events
+            error_events = []
+            if isinstance(events, list):
+                for event in events:
+                    if isinstance(event, dict):
+                        # Look for error indicators in event data
+                        event_type = event.get('type', '').lower()
+                        reason = event.get('reason', '').lower()
+                        message = event.get('message', '').lower()
+                        
+                        # Common error indicators
+                        error_keywords = ['error', 'failed', 'backoff', 'crash', 'unhealthy', 'invalid']
+                        if (event_type == 'error' or 
+                            any(keyword in reason for keyword in error_keywords) or
+                            any(keyword in message for keyword in error_keywords)):
+                            error_events.append(event)
+            
+            return error_events
+        else:
+            return [{"error": response.get("error", "Failed to retrieve events")}]
+            
+    except Exception as e:
+        return [{"error": f"Exception while getting events: {str(e)}"}]
 
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
@@ -269,6 +321,7 @@ Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
 Rules:
 - Only choose from the tools above.
+- If the query is about errors, issues, or problems in the cluster, use kubectl_get with resourceType=events and allNamespaces=true.
 - If the query clearly maps to a tool, return tool + args in JSON.
 - If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
 - If unsure, set tool=null and args=null.
@@ -279,7 +332,13 @@ Respond ONLY in strict JSON:
     if not GEMINI_AVAILABLE:
         # Fallback logic for common queries
         query_lower = query.lower()
-        if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
+        if "error" in query_lower or "issue" in query_lower or "problem" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "events", "allNamespaces": True},
+                "explanation": "User wants to see errors/issues in cluster - checking events"
+            }
+        elif "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
@@ -290,6 +349,12 @@ Respond ONLY in strict JSON:
                 "tool": "kubectl_get",
                 "args": {"resourceType": "pods", "allNamespaces": True},
                 "explanation": "User wants to see all pods"
+            }
+        elif "events" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "events", "allNamespaces": True},
+                "explanation": "User wants to see cluster events"
             }
         elif "services" in query_lower or "svc" in query_lower:
             return {
@@ -352,7 +417,8 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n\n"
             "INSTRUCTIONS:\n"
             "- Respond in clear, natural, conversational English.\n"
-            "- If it's a list, format with bullet points.\n"
+            "- If it's a list of events/errors, format with bullet points showing namespace, reason, and message.\n"
+            "- If no errors found, say 'No errors detected in the cluster. Everything looks healthy!'\n"
             "- If it's status, explain health and issues clearly.\n"
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
             "- If cluster name or size was inferred, mention that explicitly.\n"
@@ -388,6 +454,31 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
         if "items" in result:
             items = result["items"]
             count = len(items)
+            
+            # Handle events specifically
+            if "event" in user_input.lower() or "error" in user_input.lower():
+                if items:
+                    error_count = 0
+                    error_details = []
+                    
+                    for item in items:
+                        if isinstance(item, dict):
+                            event_type = item.get('type', '').lower()
+                            reason = item.get('reason', '')
+                            message = item.get('message', '')
+                            namespace = item.get('metadata', {}).get('namespace', 'default')
+                            
+                            # Count errors
+                            if event_type == 'error' or 'error' in reason.lower() or 'fail' in reason.lower():
+                                error_count += 1
+                                error_details.append(f"• **{namespace}**: {reason} - {message}")
+                    
+                    if error_count > 0:
+                        return f"Found {error_count} error events in the cluster:\n\n" + "\n".join(error_details)
+                    else:
+                        return "No error events found in the cluster. Everything looks healthy! 🎉"
+                else:
+                    return "No events found in the cluster."
             
             if "node" in user_input.lower() or "cluster size" in user_input.lower():
                 if count == 1:
@@ -539,8 +630,14 @@ def main():
         with st.chat_message("assistant"):
             st.markdown(f"🔧 Executing `{tool_name}`...")
         
+        # Special handling for error detection queries
+        if ("error" in user_prompt.lower() or "issue" in user_prompt.lower() or 
+            "problem" in user_prompt.lower() or "show me any errors" in user_prompt.lower()):
+            with st.spinner("🔍 Scanning for errors in cluster events..."):
+                error_events = get_cluster_events_with_errors(selected_server["url"])
+                resp = {"result": {"items": error_events}}
         # Special handling for "all resources" request
-        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
+        elif (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
             ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
             with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
                 all_resources = get_all_cluster_resources(selected_server["url"])
@@ -569,6 +666,8 @@ def main():
             "- \"Get cluster nodes\"\n"
             "- \"Show all services\"\n"
             "- \"List all secrets\"\n"
+            "- \"Show errors in cluster\"\n"
+            "- \"Check cluster events\"\n"
             "- \"Show all resources in cluster\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
