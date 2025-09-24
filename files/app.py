@@ -192,7 +192,9 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                  "deployment" in query_lower or "service" in query_lower or
                  "secret" in query_lower or "configmap" in query_lower or
                  "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower) and 
+                 "resource" in query_lower or "delete" in query_lower or
+                 "get" in query_lower or "list" in query_lower or
+                 "show" in query_lower) and 
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
@@ -270,6 +272,7 @@ Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 Rules:
 - Only choose from the tools above.
 - If the query clearly maps to a tool, return tool + args in JSON.
+- For delete operations, use appropriate delete tools with proper arguments.
 - If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
 - If unsure, set tool=null and args=null.
 
@@ -279,13 +282,42 @@ Respond ONLY in strict JSON:
     if not GEMINI_AVAILABLE:
         # Fallback logic for common queries
         query_lower = query.lower()
+        
+        # Delete operations
+        if "delete" in query_lower:
+            if "namespace" in query_lower or " ns " in query_lower:
+                # Extract namespace name from query
+                namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
+                namespace_name = namespace_match.group(1) if namespace_match else "default"
+                return {
+                    "tool": "kubectl_delete",
+                    "args": {"resourceType": "namespace", "name": namespace_name},
+                    "explanation": f"Deleting namespace: {namespace_name}"
+                }
+            elif "pod" in query_lower:
+                pod_match = re.search(r'pod[\s]+([\w-]+)', query_lower)
+                pod_name = pod_match.group(1) if pod_match else None
+                if pod_name:
+                    return {
+                        "tool": "kubectl_delete",
+                        "args": {"resourceType": "pod", "name": pod_name},
+                        "explanation": f"Deleting pod: {pod_name}"
+                    }
+        
+        # Get/list operations
         if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
                 "explanation": "User wants to see all resources in cluster"
             }
-        elif "pods" in query_lower:
+        elif "namespace" in query_lower or "namespaces" in query_lower or " ns " in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "namespaces"},
+                "explanation": "User wants to see all namespaces"
+            }
+        elif "pods" in query_lower or "pod" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "pods", "allNamespaces": True},
@@ -416,6 +448,15 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
                 else:
                     return "No secrets found."
+        
+        # Delete operation responses
+        if "deleted" in str(result).lower() or "success" in str(result).lower():
+            if "namespace" in user_input.lower():
+                return "✅ Namespace deleted successfully!"
+            elif "pod" in user_input.lower():
+                return "✅ Pod deleted successfully!"
+            else:
+                return "✅ Delete operation completed successfully!"
         
         # Jenkins-style responses
         if "jobs" in result:
@@ -569,6 +610,8 @@ def main():
             "- \"Get cluster nodes\"\n"
             "- \"Show all services\"\n"
             "- \"List all secrets\"\n"
+            "- \"Delete namespace [name]\"\n"
+            "- \"Delete pod [name]\"\n"
             "- \"Show all resources in cluster\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
