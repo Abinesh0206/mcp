@@ -156,6 +156,20 @@ def sanitize_args(args: dict):
     if fixed.get("resourceType") in resource_mappings:
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
     
+    # FIX: Handle namespace creation specifically
+    if fixed.get("resourceType") == "namespaces" and "name" in fixed:
+        # For namespace creation, ensure we have the right structure
+        if "manifest" not in fixed and "filename" not in fixed:
+            # Create a simple namespace manifest
+            namespace_name = fixed.get("name")
+            fixed["manifest"] = {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": namespace_name
+                }
+            }
+    
     return fixed
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
@@ -253,20 +267,6 @@ def get_all_cluster_resources(server_url: str):
     
     return all_resources
 
-def create_namespace_manifest(namespace_name: str) -> dict:
-    """Create a basic namespace manifest for creation."""
-    return {
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": namespace_name,
-            "labels": {
-                "name": namespace_name,
-                "created-by": "masaops-bot"
-            }
-        }
-    }
-
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
@@ -292,11 +292,8 @@ IMPORTANT RULES FOR KUBERNETES:
 - When user wants to see resources across all namespaces, use allNamespaces=true
 - For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
 - For nodes and namespaces, don't use namespace parameters
-- For namespace creation commands like "create namespace X" or "create ns X", use kubectl_create with resourceType: "namespace" and provide a manifest
-
-SPECIAL HANDLING FOR NAMESPACE CREATION:
-- If user wants to create a namespace (e.g., "create namespace myns", "create ns myns"), use kubectl_create
-- The arguments should include: resourceType: "namespace" and manifest with the namespace definition
+- For creating namespaces: use kubectl_create with resourceType: "namespaces" and name: "<namespace_name>"
+- For deleting namespaces: use kubectl_delete with resourceType: "namespaces" and name: "<namespace_name>"
 
 Rules:
 - Only choose from the tools above.
@@ -312,19 +309,26 @@ Respond ONLY in strict JSON:
         query_lower = query.lower()
         
         # Handle namespace creation
-        if "create namespace" in query_lower or "create ns" in query_lower:
+        if any(word in query_lower for word in ["create namespace", "create ns", "make namespace"]):
             # Extract namespace name from query
-            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', query_lower)
+            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
             if namespace_match:
                 namespace_name = namespace_match.group(1)
-                manifest = create_namespace_manifest(namespace_name)
                 return {
                     "tool": "kubectl_create",
-                    "args": {
-                        "resourceType": "namespace",
-                        "manifest": manifest
-                    },
-                    "explanation": f"Creating namespace '{namespace_name}' with basic manifest"
+                    "args": {"resourceType": "namespaces", "name": namespace_name},
+                    "explanation": f"Creating namespace '{namespace_name}'"
+                }
+        
+        # Handle namespace deletion
+        if any(word in query_lower for word in ["delete namespace", "delete ns", "remove namespace"]):
+            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
+            if namespace_match:
+                namespace_name = namespace_match.group(1)
+                return {
+                    "tool": "kubectl_delete",
+                    "args": {"resourceType": "namespaces", "name": namespace_name},
+                    "explanation": f"Deleting namespace '{namespace_name}'"
                 }
         
         # Handle "all pods in all namespaces" requests
@@ -364,12 +368,6 @@ Respond ONLY in strict JSON:
                 "args": {"resourceType": "nodes"},
                 "explanation": "User wants to see all nodes"
             }
-        elif "namespaces" in query_lower or "namespace" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "namespaces"},
-                "explanation": "User wants to see all namespaces"
-            }
         else:
             return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     
@@ -387,19 +385,6 @@ Respond ONLY in strict JSON:
         
         if not parsed:
             parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
-        
-        # Special handling for namespace creation
-        if (parsed.get("tool") == "kubectl_create" and 
-            parsed.get("args", {}).get("resourceType") == "namespace" and
-            "manifest" not in parsed.get("args", {})):
-            
-            # Extract namespace name from query for fallback
-            query_lower = query.lower()
-            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', query_lower)
-            if namespace_match:
-                namespace_name = namespace_match.group(1)
-                parsed["args"]["manifest"] = create_namespace_manifest(namespace_name)
-                parsed["explanation"] = f"Creating namespace '{namespace_name}' with generated manifest"
         
         parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
@@ -431,7 +416,6 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
             "- If cluster name or size was inferred, mention that explicitly.\n"
             "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
-            "- For namespace creation, confirm successful creation or explain any issues.\n"
             "- NEVER show JSON, code, or internal errors to user unless asked.\n"
             "- Be helpful, friendly, and precise."
         )
@@ -451,21 +435,36 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     """Generate human-friendly answer without Gemini."""
     if "error" in raw_response:
         error_msg = raw_response["error"]
+        
+        # Handle namespace creation errors specifically
+        if "create" in user_input.lower() and "namespace" in user_input.lower():
+            if "already exists" in error_msg.lower():
+                return "This namespace already exists in the cluster."
+            elif "forbidden" in error_msg.lower() or "permission" in error_msg.lower():
+                return "I don't have permission to create namespaces. Please check your Kubernetes RBAC permissions."
+            else:
+                return f"Sorry, I couldn't create the namespace: {error_msg}"
+        
         if "cluster" in user_input.lower():
             return "I couldn't retrieve the cluster information right now. Please check if the MCP server is running and accessible."
         return f"Sorry, I encountered an issue: {error_msg}"
     
     result = raw_response.get("result", {})
     
-    # Handle namespace creation response
+    # Handle namespace creation success
     if "create" in user_input.lower() and "namespace" in user_input.lower():
-        if "error" not in raw_response:
-            # Extract namespace name from query
-            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', user_input.lower())
+        if result and not result.get("error"):
+            # Extract namespace name from user input
+            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', user_input.lower())
             namespace_name = namespace_match.group(1) if namespace_match else "the requested"
             return f"✅ Successfully created namespace '{namespace_name}'!"
-        else:
-            return f"❌ Failed to create namespace. The error was: {raw_response.get('error', 'Unknown error')}"
+    
+    # Handle namespace deletion success
+    if "delete" in user_input.lower() and "namespace" in user_input.lower():
+        if result and not result.get("error"):
+            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', user_input.lower())
+            namespace_name = namespace_match.group(1) if namespace_match else "the requested"
+            return f"✅ Successfully deleted namespace '{namespace_name}'!"
     
     # Handle different response formats
     if isinstance(result, dict):
@@ -548,13 +547,15 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                 return "No ArgoCD applications found."
     
     # Generic fallback for successful operations
-    if "create" in user_input.lower() and not raw_response.get("error"):
-        return "✅ Operation completed successfully!"
+    if result and not result.get("error"):
+        if "create" in user_input.lower():
+            return "✅ Operation completed successfully!"
+        elif "delete" in user_input.lower():
+            return "✅ Operation completed successfully!"
+        else:
+            return "✅ Operation completed successfully. Found data across all namespaces."
     
-    if result:
-        return f"Operation completed successfully. Found data across all namespaces."
-    
-    return "Operation completed successfully, but no data was returned."
+    return "Operation completed, but no specific data was returned."
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
     """Extract cluster name/size from Gemini answer and store in session."""
@@ -682,13 +683,13 @@ def main():
         helpful_response = (
             "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
             "**For Kubernetes:**\n"
+            "- \"Create namespace abinesh\"\n"
+            "- \"Delete namespace undefined\"\n"
             "- \"List all pods in all namespaces\"\n"
             "- \"Show all services across all namespaces\"\n"
             "- \"Get cluster nodes\"\n"
             "- \"List all secrets in all namespaces\"\n"
-            "- \"Show all resources in cluster\"\n"
-            "- \"Create namespace my-namespace\"\n"
-            "- \"Delete namespace my-namespace\"\n\n"
+            "- \"Show all resources in cluster\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
             "- \"Show build status\"\n\n"
