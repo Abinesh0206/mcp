@@ -18,7 +18,7 @@ except Exception:
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")  # Auth gateway URL
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_AVAILABLE = False
 
 if genai and GEMINI_API_KEY:
@@ -39,66 +39,16 @@ def load_servers_from_file() -> List[Dict[str, Any]]:
                 return servers
     except Exception:
         pass
-    # Fallback defaults - POINT TO CORRECT MCP SERVERS
+    # Fallback defaults
     return [
-        {"name": "jenkins", "url": "http://3.80.48.199:8080/mcp?target=jenkins", "description": "Jenkins"},
-        {"name": "kubernetes", "url": "http://13.222.157.210:3000/mcp?target=kubernetes", "description": "Kubernetes"},  # FIXED URL
-        {"name": "argocd", "url": "http://54.227.78.211:8083/mcp?target=argocd", "description": "ArgoCD"},
+        {"name": "jenkins", "url": f"{API_URL}/mcp", "description": "Jenkins"},
+        {"name": "kubernetes", "url": f"{API_URL}/mcp", "description": "Kubernetes"},
+        {"name": "argocd", "url": f"{API_URL}/mcp", "description": "ArgoCD"},
     ]
 
 SERVERS = load_servers_from_file()
 SERVER_NAMES = [s.get("name") for s in SERVERS]
 
-# ---------------- GATEWAY UTIL ----------------
-def gateway_call(target: str,
-                 method: str,
-                 params: Optional[Dict[str, Any]] = None,
-                 session_id: Optional[str] = None,
-                 timeout: int = 30) -> Dict[str, Any]:
-    """
-    Call API_URL/mcp?target=<target> with JSON-RPC body.
-    For YOUR auth gateway: session_id must be in JSON body (not header)!
-    """
-    url = f"{API_URL}/mcp?target={target}"
-    body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params or {}
-    }
-    
-    # CRITICAL FIX: Add session_id to JSON body (not header!)
-    if session_id:
-        body["session_id"] = session_id  # Your gateway expects this!
-    
-    try:
-        response = requests.post(url, json=body, timeout=timeout)
-        response.raise_for_status()
-        
-        # Handle different response formats
-        text = response.text.strip()
-        
-        # Handle SSE-style responses
-        if text.startswith("data:") or "data:" in text:
-            lines = text.split('\n')
-            for line in lines:
-                if line.startswith('data:'):
-                    data_content = line[5:].strip()
-                    try:
-                        return json.loads(data_content)
-                    except json.JSONDecodeError:
-                        return {"result": data_content}
-        
-        # Handle regular JSON responses
-        try:
-            return response.json()
-        except json.JSONDecodeError:
-            return {"result": text}
-            
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Gateway request failed: {str(e)}"}
-    except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
 # ---------------- HELPERS ----------------
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Fix arguments before sending to MCP tools via gateway."""
@@ -217,23 +167,30 @@ def get_all_cluster_resources(server_name: str, session_id: str):
             params = {"resourceType": resource_type}
             if resource_type not in ["namespaces", "nodes"]:
                 params["allNamespaces"] = True
-                
-            response = gateway_call(
-                target=server_name,
-                method="tools/call",
-                params={"name": "kubectl_get", "arguments": params},
-                session_id=session_id,
-                timeout=30
-            )
             
-            if response and not response.get("error"):
-                result = response.get("result", {})
-                if isinstance(result, dict) and "items" in result:
-                    all_resources[resource_type] = result["items"]
+            # FIXED: Use correct JSON structure with session_id at top level
+            rpc_body = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "kubectl_get",
+                    "arguments": params
+                },
+                "session_id": session_id
+            }
+            
+            url = f"{API_URL}/mcp?target={server_name}"
+            response = requests.post(url, json=rpc_body, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if isinstance(result, dict) and "result" in result:
+                    all_resources[resource_type] = result["result"]
                 else:
                     all_resources[resource_type] = result
             else:
-                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
+                all_resources[resource_type] = f"Error: HTTP {response.status_code}"
                 
             time.sleep(0.1)
             
@@ -248,30 +205,46 @@ def call_tool(server_name: str, name: str, arguments: dict, session_id: str):
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
     
-    rpc_params = {"name": name, "arguments": arguments}
-    return gateway_call(
-        target=server_name, 
-        method="tools/call", 
-        params=rpc_params, 
-        session_id=session_id, 
-        timeout=30
-    )
+    # FIXED: Create full JSON-RPC body with session_id at top level
+    rpc_body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments
+        },
+        "session_id": session_id  # CRITICAL: session_id at top level for your auth gateway
+    }
+    
+    url = f"{API_URL}/mcp?target={server_name}"
+    try:
+        response = requests.post(url, json=rpc_body, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Gateway request failed: {str(e)}"}
 
 # ---------------- LIST TOOLS ----------------
 def list_mcp_tools_for_server(server_name: str) -> List[str]:
     """List tools by calling gateway tools/list on that server name."""
     try:
-        resp = gateway_call(
-            target=server_name, 
-            method="tools/list", 
-            params={}, 
-            session_id=None, 
-            timeout=10
-        )
+        # FIXED: Use correct format for tools/list
+        rpc_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+            "session_id": "dummy"  # tools/list doesn't require auth, but gateway expects session_id
+        }
         
-        result = resp.get("result")
+        url = f"{API_URL}/mcp?target={server_name}"
+        response = requests.post(url, json=rpc_body, timeout=10)
+        response.raise_for_status()
+        
+        result = response.json()
         if isinstance(result, dict):
-            tools = result.get("tools") or []
+            tools = result.get("result", {}).get("tools") or result.get("result", [])
         elif isinstance(result, list):
             tools = result
         else:
@@ -733,20 +706,33 @@ def main():
     # Smart fallbacks: if expecting cluster name and resp empty/error -> try nodes
     if ("cluster name" in user_prompt.lower()) and (not resp or resp.get("error")):
         st.chat_message("assistant").markdown("📌 Attempting to infer cluster name from nodes...")
-        node_resp = gateway_call(
-            target=chosen_server,
-            method="tools/call",
-            params={"name":"kubectl_get","arguments":{"resourceType":"nodes","format":"json"}},
-            session_id=st.session_state.session,
-            timeout=20
-        )
-        items = (node_resp.get("result") or {}).get("items") if isinstance(node_resp.get("result"), dict) else None
-        if items and len(items) > 0:
-            first_node = items[0].get("metadata", {}).get("name", "unknown")
-            cluster_hint = first_node.split(".")[0] if "." in first_node else first_node
-            st.session_state["last_known_cluster_name"] = cluster_hint
-            resp = {"result": {"inferred_cluster_name": cluster_hint}}
-            st.chat_message("assistant").markdown(f"✅ I inferred the cluster name: *{cluster_hint}*")
+        
+        # FIXED: Use correct format with session_id at top level
+        rpc_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "kubectl_get",
+                "arguments": {"resourceType": "nodes", "format": "json"}
+            },
+            "session_id": st.session_state.session
+        }
+        
+        url = f"{API_URL}/mcp?target={chosen_server}"
+        try:
+            node_resp = requests.post(url, json=rpc_body, timeout=20)
+            if node_resp.status_code == 200:
+                result = node_resp.json()
+                items = result.get("result", {}).get("items") if isinstance(result.get("result"), dict) else None
+                if items and len(items) > 0:
+                    first_node = items[0].get("metadata", {}).get("name", "unknown")
+                    cluster_hint = first_node.split(".")[0] if "." in first_node else first_node
+                    st.session_state["last_known_cluster_name"] = cluster_hint
+                    resp = {"result": {"inferred_cluster_name": cluster_hint}}
+                    st.chat_message("assistant").markdown(f"✅ I inferred the cluster name: *{cluster_hint}*")
+        except Exception as e:
+            st.chat_message("assistant").markdown(f"Failed to get nodes: {str(e)}")
 
     # Smart cluster size handling
     if "cluster size" in user_prompt.lower() and chosen_tool == "kubectl_get" and tool_args.get("resourceType") == "nodes":
