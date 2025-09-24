@@ -16,7 +16,7 @@ except Exception:
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")
+API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")  # Auth gateway URL
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_AVAILABLE = False
@@ -39,11 +39,11 @@ def load_servers_from_file() -> List[Dict[str, Any]]:
                 return servers
     except Exception:
         pass
-    # Fallback defaults
+    # Fallback defaults - POINT TO CORRECT MCP SERVERS
     return [
-        {"name": "jenkins", "url": f"{API_URL}/mcp", "description": "Jenkins"},
-        {"name": "kubernetes", "url": f"{API_URL}/mcp", "description": "Kubernetes"},
-        {"name": "argocd", "url": f"{API_URL}/mcp", "description": "ArgoCD"},
+        {"name": "jenkins", "url": "http://3.80.48.199:8080/mcp?target=jenkins", "description": "Jenkins"},
+        {"name": "kubernetes", "url": "http://13.222.157.210:3000/mcp?target=kubernetes", "description": "Kubernetes"},  # FIXED URL
+        {"name": "argocd", "url": "http://54.227.78.211:8083/mcp?target=argocd", "description": "ArgoCD"},
     ]
 
 SERVERS = load_servers_from_file()
@@ -57,20 +57,23 @@ def gateway_call(target: str,
                  timeout: int = 30) -> Dict[str, Any]:
     """
     Call API_URL/mcp?target=<target> with JSON-RPC body.
-    Adds session_id in the body when provided.
+    Sends session_id in Authorization header for authentication.
     """
-    url = f"{API_URL}/mcp?target={target}"
+    url = f"{API_URL}/mcp?target={target}"  # Points to AUTH gateway
     body = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": method,
         "params": params or {}
     }
+    
+    # CRITICAL FIX: Send session token in Authorization header
+    headers = {"Content-Type": "application/json"}
     if session_id:
-        body["session_id"] = session_id
+        headers["Authorization"] = f"Bearer {session_id}"
     
     try:
-        response = requests.post(url, json=body, timeout=timeout)
+        response = requests.post(url, json=body, headers=headers, timeout=timeout)
         response.raise_for_status()
         
         # Handle different response formats
@@ -213,8 +216,7 @@ def get_all_cluster_resources(server_name: str, session_id: str):
     
     for resource_type in resource_types:
         try:
-            # Use gateway call for each resource type
-            params = {"resourceType": resourceType}
+            params = {"resourceType": resource_type}
             if resource_type not in ["namespaces", "nodes"]:
                 params["allNamespaces"] = True
                 
