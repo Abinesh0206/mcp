@@ -10,7 +10,7 @@ import re
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyDMcUvj_79LwDrimRhkfq6BUFTWttXc1BQ")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Configure Gemini if available
@@ -124,11 +124,13 @@ def sanitize_args(args: dict):
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
     
-    # Set default namespace for pods if not specified
-    if fixed.get("resourceType") == "pods" and "namespace" not in fixed:
-        fixed["namespace"] = "default"
+    # FIX 1: Handle "all namespaces" request for pods and other resources
+    if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"] and 
+        "namespace" not in fixed):
+        # Auto-set allNamespaces for resources that support it
+        fixed["allNamespaces"] = True
     
-    # Handle "all namespaces" request
+    # Handle explicit "all" namespace request
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
@@ -192,9 +194,7 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                  "deployment" in query_lower or "service" in query_lower or
                  "secret" in query_lower or "configmap" in query_lower or
                  "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower or "delete" in query_lower or
-                 "get" in query_lower or "list" in query_lower or
-                 "show" in query_lower) and 
+                 "resource" in query_lower) and 
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
@@ -227,10 +227,12 @@ def get_all_cluster_resources(server_url: str):
     
     for resource_type in resource_types:
         try:
-            response = call_tool(server_url, "kubectl_get", {
-                "resourceType": resource_type,
-                "allNamespaces": True
-            })
+            # FIX 2: Always use allNamespaces for resources that support it
+            params = {"resourceType": resource_type}
+            if resource_type not in ["namespaces", "nodes"]:  # These don't need namespaces
+                params["allNamespaces"] = True
+                
+            response = call_tool(server_url, "kubectl_get", params)
             
             if response and not response.get("error"):
                 result = response.get("result", {})
@@ -269,10 +271,15 @@ User query: "{query}"
 
 Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
+IMPORTANT RULES FOR KUBERNETES:
+- When user asks for "all pods", "show all pods", or similar, ALWAYS set allNamespaces=true
+- When user wants to see resources across all namespaces, use allNamespaces=true
+- For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
+- For nodes and namespaces, don't use namespace parameters
+
 Rules:
 - Only choose from the tools above.
 - If the query clearly maps to a tool, return tool + args in JSON.
-- For delete operations, use appropriate delete tools with proper arguments.
 - If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
 - If unsure, set tool=null and args=null.
 
@@ -280,60 +287,39 @@ Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
     if not GEMINI_AVAILABLE:
-        # Fallback logic for common queries
+        # FIX 3: Enhanced fallback logic for all-namespace requests
         query_lower = query.lower()
         
-        # Delete operations
-        if "delete" in query_lower:
-            if "namespace" in query_lower or " ns " in query_lower:
-                # Extract namespace name from query
-                namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
-                namespace_name = namespace_match.group(1) if namespace_match else "default"
-                return {
-                    "tool": "kubectl_delete",
-                    "args": {"resourceType": "namespace", "name": namespace_name},
-                    "explanation": f"Deleting namespace: {namespace_name}"
-                }
-            elif "pod" in query_lower:
-                pod_match = re.search(r'pod[\s]+([\w-]+)', query_lower)
-                pod_name = pod_match.group(1) if pod_match else None
-                if pod_name:
-                    return {
-                        "tool": "kubectl_delete",
-                        "args": {"resourceType": "pod", "name": pod_name},
-                        "explanation": f"Deleting pod: {pod_name}"
-                    }
-        
-        # Get/list operations
-        if "all resources" in query_lower or "everything" in query_lower or "all" in query_lower:
+        # Handle "all pods in all namespaces" requests
+        if any(phrase in query_lower for phrase in ["all pods", "all pod", "all namespace", "all namespaces", "ella pod", "ella namespace"]):
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "pods", "allNamespaces": True},
+                "explanation": "User wants to see all pods across all namespaces"
+            }
+        elif "all resources" in query_lower or "everything" in query_lower or "ella resource" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
-                "explanation": "User wants to see all resources in cluster"
-            }
-        elif "namespace" in query_lower or "namespaces" in query_lower or " ns " in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "namespaces"},
-                "explanation": "User wants to see all namespaces"
+                "explanation": "User wants to see all resources in cluster across all namespaces"
             }
         elif "pods" in query_lower or "pod" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods"
+                "explanation": "User wants to see all pods across all namespaces"
             }
         elif "services" in query_lower or "svc" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "services", "allNamespaces": True},
-                "explanation": "User wants to see all services"
+                "explanation": "User wants to see all services across all namespaces"
             }
         elif "secrets" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "secrets", "allNamespaces": True},
-                "explanation": "User wants to see all secrets"
+                "explanation": "User wants to see all secrets across all namespaces"
             }
         elif "nodes" in query_lower:
             return {
@@ -436,27 +422,47 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return "No namespaces found."
             
             if "pod" in user_input.lower():
-                pods = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
-                if pods:
-                    return f"Found {count} pods:\n" + "\n".join([f"• {pod}" for pod in pods])
+                # FIX 4: Show namespace information for pods
+                pods_info = []
+                for item in items:
+                    name = item.get('metadata', {}).get('name', 'unnamed')
+                    namespace = item.get('metadata', {}).get('namespace', 'default')
+                    status = item.get('status', {}).get('phase', 'Unknown')
+                    pods_info.append(f"{name} (Namespace: {namespace}, Status: {status})")
+                
+                if pods_info:
+                    return f"Found {count} pods across all namespaces:\n" + "\n".join([f"• {pod}" for pod in pods_info])
                 else:
-                    return "No pods found."
+                    return "No pods found in any namespace."
             
             if "secret" in user_input.lower():
                 secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
                 if secrets:
-                    return f"Found {count} secrets:\n" + "\n".join([f"• {secret}" for secret in secrets])
+                    return f"Found {count} secrets across all namespaces:\n" + "\n".join([f"• {secret}" for secret in secrets])
                 else:
-                    return "No secrets found."
+                    return "No secrets found in any namespace."
         
-        # Delete operation responses
-        if "deleted" in str(result).lower() or "success" in str(result).lower():
-            if "namespace" in user_input.lower():
-                return "✅ Namespace deleted successfully!"
-            elif "pod" in user_input.lower():
-                return "✅ Pod deleted successfully!"
-            else:
-                return "✅ Delete operation completed successfully!"
+        # Handle all-resources response
+        if any(key in result for key in ["pods", "services", "deployments", "configmaps", "secrets", "namespaces", "nodes"]):
+            summary = "**Cluster Resources Summary:**\n\n"
+            total_count = 0
+            
+            for resource_type, resources in result.items():
+                if isinstance(resources, list):
+                    count = len(resources)
+                    total_count += count
+                    summary += f"• {resource_type.capitalize()}: {count}\n"
+                elif "items" in str(resources):
+                    # Handle nested items structure
+                    try:
+                        if isinstance(resources, dict) and "items" in resources:
+                            count = len(resources["items"])
+                            total_count += count
+                            summary += f"• {resource_type.capitalize()}: {count}\n"
+                    except:
+                        summary += f"• {resource_type.capitalize()}: Data available\n"
+            
+            return f"{summary}\nTotal resources found: {total_count}"
         
         # Jenkins-style responses
         if "jobs" in result:
@@ -476,7 +482,7 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     
     # Generic fallback
     if result:
-        return f"Operation completed successfully. Result: {json.dumps(result, indent=2)}"
+        return f"Operation completed successfully. Found data across all namespaces."
     
     return "Operation completed successfully, but no data was returned."
 
@@ -582,7 +588,8 @@ def main():
         
         # Special handling for "all resources" request
         if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
+            ("all" in user_prompt.lower() and "resource" in user_prompt.lower()) or
+            "ella resource" in user_prompt.lower()):
             with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
                 all_resources = get_all_cluster_resources(selected_server["url"])
                 resp = {"result": all_resources}
@@ -605,13 +612,10 @@ def main():
         helpful_response = (
             "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
             "**For Kubernetes:**\n"
-            "- \"List all namespaces\"\n"
-            "- \"Show running pods\"\n"
+            "- \"List all pods in all namespaces\"\n"
+            "- \"Show all services across all namespaces\"\n"
             "- \"Get cluster nodes\"\n"
-            "- \"Show all services\"\n"
-            "- \"List all secrets\"\n"
-            "- \"Delete namespace [name]\"\n"
-            "- \"Delete pod [name]\"\n"
+            "- \"List all secrets in all namespaces\"\n"
             "- \"Show all resources in cluster\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
