@@ -1,3 +1,4 @@
+# ---------------- CONFIG ----------------
 import os
 import json
 import time
@@ -157,22 +158,10 @@ def sanitize_args(args: dict):
     if fixed.get("resourceType") in resource_mappings:
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
     
-    # FIX: Handle namespace creation specifically - USE YAML FORMAT
-    if fixed.get("resourceType") == "namespaces" and "name" in fixed:
-        # For namespace creation, create proper YAML format
-        namespace_name = fixed.get("name")
-        namespace_manifest = {
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {
-                "name": namespace_name
-            }
-        }
-        # Convert to YAML string
-        fixed["manifest"] = yaml.dump(namespace_manifest)
-        # Remove name parameter as it's now in the manifest
-        if "name" in fixed:
-            del fixed["name"]
+    # ✅ CRITICAL FIX: DO NOT convert namespace creation to YAML.
+    # Most MCP servers expect: { "resourceType": "namespaces", "name": "abi" }
+    # So we LEAVE the 'name' field as-is and DO NOT create a manifest.
+    # Remove the old YAML conversion logic entirely.
     
     return fixed
 
@@ -323,6 +312,21 @@ Respond ONLY in strict JSON:
                     "args": {"resourceType": "namespaces", "name": namespace_name},
                     "explanation": f"Creating namespace '{namespace_name}'"
                 }
+            else:
+                # Try to extract any word after "create namespace"
+                words = query_lower.split()
+                try:
+                    idx = words.index("namespace") if "namespace" in words else words.index("ns")
+                    if idx + 1 < len(words):
+                        namespace_name = words[idx + 1]
+                        if namespace_name.isalnum() or '-' in namespace_name:
+                            return {
+                                "tool": "kubectl_create",
+                                "args": {"resourceType": "namespaces", "name": namespace_name},
+                                "explanation": f"Creating namespace '{namespace_name}'"
+                            }
+                except:
+                    pass
         
         # Handle namespace deletion
         if any(word in query_lower for word in ["delete namespace", "delete ns", "remove namespace"]):
