@@ -396,10 +396,10 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
 def extract_and_store_cluster_info(user_input: str, answer: str):
     try:
         if "cluster name" in user_input.lower():
-            patterns = [
-                r"cluster[^\w]*([\w-]+)",
-                r"name[^\w][:\-]?[^"]?([\w-]+)",
-                r"\*([\w-]+)\*",
+           patterns = [
+               r"cluster[^\w]*([\w-]+)",
+               r'name[^\w][:\-]?[^"]?([\w-]+)',
+               r"\*([\w-]+)\*",
             ]
             for pattern in patterns:
                 match = re.search(pattern, answer, re.IGNORECASE)
