@@ -124,9 +124,10 @@ def sanitize_args(args: dict):
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
     
-    # Handle "all namespaces" request for pods and other resources
+    # FIX 1: Handle "all namespaces" request for pods and other resources
     if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"] and 
         "namespace" not in fixed):
+        # Auto-set allNamespaces for resources that support it
         fixed["allNamespaces"] = True
     
     # Handle explicit "all" namespace request
@@ -173,17 +174,21 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
     """Automatically detect which server to use based on query content."""
     query_lower = query.lower()
     
+    # Check each server's tools to see which one matches the query
     for server in available_servers:
         try:
             tools = list_mcp_tools(server["url"])
             tool_names = [t.get("name", "").lower() for t in tools if t.get("name")]
             
+            # Check if any tool name is mentioned in the query
             for tool_name in tool_names:
                 if tool_name in query_lower:
                     return server
             
+            # Check for common keywords that match server types
             server_name = server["name"].lower()
             
+            # Kubernetes queries
             if (("kubernetes" in query_lower or "k8s" in query_lower or 
                  "pod" in query_lower or "namespace" in query_lower or
                  "deployment" in query_lower or "service" in query_lower or
@@ -193,11 +198,13 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
+            # Jenkins queries
             if (("jenkins" in query_lower or "job" in query_lower or 
                  "build" in query_lower or "pipeline" in query_lower) and 
                 "jenkins" in server_name):
                 return server
                 
+            # ArgoCD queries
             if (("argocd" in query_lower or "application" in query_lower or 
                  "gitops" in query_lower or "sync" in query_lower) and 
                 "argocd" in server_name):
@@ -206,6 +213,7 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
         except Exception:
             continue
     
+    # If no specific server detected, return the first available one
     return available_servers[0] if available_servers else None
 
 def get_all_cluster_resources(server_url: str):
@@ -219,8 +227,9 @@ def get_all_cluster_resources(server_url: str):
     
     for resource_type in resource_types:
         try:
+            # FIX 2: Always use allNamespaces for resources that support it
             params = {"resourceType": resource_type}
-            if resource_type not in ["namespaces", "nodes"]:
+            if resource_type not in ["namespaces", "nodes"]:  # These don't need namespaces
                 params["allNamespaces"] = True
                 
             response = call_tool(server_url, "kubectl_get", params)
@@ -234,6 +243,7 @@ def get_all_cluster_resources(server_url: str):
             else:
                 all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
                 
+            # Small delay to avoid overwhelming the server
             time.sleep(0.1)
             
         except Exception as e:
@@ -247,11 +257,43 @@ def ask_gemini_for_tool_decision(query: str, server_url: str):
     tools = list_mcp_tools(server_url)
     tool_names = [t["name"] for t in tools if "name" in t]
 
+    # Inject context from session state if available
     context_notes = ""
     if st.session_state.last_known_cluster_name:
         context_notes += f"\nUser previously interacted with cluster: {st.session_state.last_known_cluster_name}"
     if st.session_state.last_known_cluster_size:
         context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
+
+    # FIX: Enhanced namespace creation detection
+    query_lower = query.lower().strip()
+    
+    # Direct pattern matching for namespace creation commands
+    if query_lower.startswith(("create ns ", "create namespace ")):
+        # Extract namespace name from command
+        namespace_name = query_lower.replace("create ns ", "").replace("create namespace ", "").strip()
+        if namespace_name:
+            return {
+                "tool": "kubectl_create",
+                "args": {
+                    "resourceType": "namespace",
+                    "resourceName": namespace_name
+                },
+                "explanation": f"Creating namespace '{namespace_name}'"
+            }
+    
+    # Also handle variations like "create namespace efk"
+    create_pattern = r"create\s+(ns|namespace)\s+(\w+)"
+    match = re.search(create_pattern, query_lower)
+    if match:
+        namespace_name = match.group(2)
+        return {
+            "tool": "kubectl_create",
+            "args": {
+                "resourceType": "namespace", 
+                "resourceName": namespace_name
+            },
+            "explanation": f"Creating namespace '{namespace_name}'"
+        }
 
     instruction = f"""
 You are an AI agent that maps user queries to MCP tools.
@@ -260,49 +302,44 @@ User query: "{query}"
 
 Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
 
-IMPORTANT RULES FOR CREATING RESOURCES:
-- When user wants to create a namespace, use kubectl_create with resource_type="namespace" and resource_name="name"
-- For creating namespace, arguments should be: {{"resource_type": "namespace", "resource_name": "name"}}
-- When user asks for "all pods", use kubectl_get with allNamespaces=true
+IMPORTANT RULES FOR KUBERNETES:
+- When user asks for "all pods", "show all pods", or similar, ALWAYS set allNamespaces=true
+- When user wants to see resources across all namespaces, use allNamespaces=true
+- For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
+- For nodes and namespaces, don't use namespace parameters
+- For namespace creation: if user says "create ns <name>" or "create namespace <name>", use kubectl_create with resourceType=namespace and resourceName=<name>
 
 Rules:
 - Only choose from the tools above.
 - If the query clearly maps to a tool, return tool + args in JSON.
+- If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
 - If unsure, set tool=null and args=null.
 
 Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
     if not GEMINI_AVAILABLE:
+        # Enhanced fallback logic
         query_lower = query.lower()
         
-        # FIX: Handle namespace creation commands
-        if any(phrase in query_lower for phrase in ["create namespace", "create ns", "create namespace efk", "create ns efk"]):
-            # Extract namespace name from query
-            namespace_name = "efk"  # default
-            if "efk" in query_lower:
-                namespace_name = "efk"
-            elif "create namespace" in query_lower:
-                parts = query_lower.split("create namespace")
-                if len(parts) > 1:
-                    namespace_name = parts[1].strip()
-            elif "create ns" in query_lower:
-                parts = query_lower.split("create ns")
-                if len(parts) > 1:
-                    namespace_name = parts[1].strip()
-            
-            return {
-                "tool": "kubectl_create",
-                "args": {"resource_type": "namespace", "resource_name": namespace_name},
-                "explanation": f"Creating namespace: {namespace_name}"
-            }
-        elif any(phrase in query_lower for phrase in ["all pods", "all pod", "all namespace", "all namespaces"]):
+        # Handle namespace creation in fallback
+        if query_lower.startswith(("create ns ", "create namespace ")):
+            namespace_name = query_lower.replace("create ns ", "").replace("create namespace ", "").strip()
+            if namespace_name:
+                return {
+                    "tool": "kubectl_create",
+                    "args": {"resourceType": "namespace", "resourceName": namespace_name},
+                    "explanation": f"Creating namespace '{namespace_name}'"
+                }
+        
+        # Handle "all pods in all namespaces" requests
+        if any(phrase in query_lower for phrase in ["all pods", "all pod", "all namespace", "all namespaces", "ella pod", "ella namespace"]):
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "pods", "allNamespaces": True},
                 "explanation": "User wants to see all pods across all namespaces"
             }
-        elif "all resources" in query_lower or "everything" in query_lower:
+        elif "all resources" in query_lower or "everything" in query_lower or "ella resource" in query_lower:
             return {
                 "tool": "kubectl_get",
                 "args": {"resourceType": "all", "allNamespaces": True},
@@ -314,11 +351,23 @@ Respond ONLY in strict JSON:
                 "args": {"resourceType": "pods", "allNamespaces": True},
                 "explanation": "User wants to see all pods across all namespaces"
             }
-        elif "namespaces" in query_lower or "namespace" in query_lower:
+        elif "services" in query_lower or "svc" in query_lower:
             return {
                 "tool": "kubectl_get",
-                "args": {"resourceType": "namespaces"},
-                "explanation": "User wants to see all namespaces"
+                "args": {"resourceType": "services", "allNamespaces": True},
+                "explanation": "User wants to see all services across all namespaces"
+            }
+        elif "secrets" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "secrets", "allNamespaces": True},
+                "explanation": "User wants to see all secrets across all namespaces"
+            }
+        elif "nodes" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "nodes"},
+                "explanation": "User wants to see all nodes"
             }
         else:
             return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
@@ -328,6 +377,7 @@ Respond ONLY in strict JSON:
         response = model.generate_content(instruction)
         text = response.text.strip()
         
+        # Try to extract JSON from response
         parsed = None
         try:
             parsed = json.loads(text)
@@ -374,6 +424,7 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
         resp = model.generate_content(prompt)
         answer = getattr(resp, "text", str(resp)).strip()
 
+        # Extract and store cluster info for future context
         extract_and_store_cluster_info(user_input, answer)
 
         return answer
@@ -385,24 +436,39 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     """Generate human-friendly answer without Gemini."""
     if "error" in raw_response:
         error_msg = raw_response["error"]
+        if "cluster" in user_input.lower():
+            return "I couldn't retrieve the cluster information right now. Please check if the MCP server is running and accessible."
         return f"Sorry, I encountered an issue: {error_msg}"
     
     result = raw_response.get("result", {})
     
-    # Handle namespace creation response
-    if "create namespace" in user_input.lower() or "create ns" in user_input.lower():
-        if result and "namespace" in str(result).lower():
-            return f"✅ Namespace created successfully! {result}"
-        elif result:
-            return f"✅ Operation completed: {result}"
+    # Handle namespace creation responses
+    if "create" in user_input.lower() and ("ns" in user_input.lower() or "namespace" in user_input.lower()):
+        if "error" not in raw_response:
+            # Extract namespace name from query
+            namespace_name = "unknown"
+            create_pattern = r"create\s+(ns|namespace)\s+(\w+)"
+            match = re.search(create_pattern, user_input.lower())
+            if match:
+                namespace_name = match.group(2)
+            
+            return f"✅ Namespace '{namespace_name}' created successfully!"
         else:
-            return "✅ Namespace creation request was sent successfully."
+            return f"❌ Failed to create namespace. Error: {raw_response.get('error', 'Unknown error')}"
     
     # Handle different response formats
     if isinstance(result, dict):
+        # Kubernetes-style responses with items
         if "items" in result:
             items = result["items"]
             count = len(items)
+            
+            if "node" in user_input.lower() or "cluster size" in user_input.lower():
+                if count == 1:
+                    node_name = items[0].get("metadata", {}).get("name", "unknown")
+                    return f"This is a single-node cluster. The node is named: {node_name}"
+                else:
+                    return f"The cluster has {count} nodes."
             
             if "namespace" in user_input.lower():
                 namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
@@ -412,6 +478,7 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return "No namespaces found."
             
             if "pod" in user_input.lower():
+                # Show namespace information for pods
                 pods_info = []
                 for item in items:
                     name = item.get('metadata', {}).get('name', 'unnamed')
@@ -423,20 +490,67 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return f"Found {count} pods across all namespaces:\n" + "\n".join([f"• {pod}" for pod in pods_info])
                 else:
                     return "No pods found in any namespace."
+            
+            if "secret" in user_input.lower():
+                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
+                if secrets:
+                    return f"Found {count} secrets across all namespaces:\n" + "\n".join([f"• {secret}" for secret in secrets])
+                else:
+                    return "No secrets found in any namespace."
+        
+        # Handle all-resources response
+        if any(key in result for key in ["pods", "services", "deployments", "configmaps", "secrets", "namespaces", "nodes"]):
+            summary = "**Cluster Resources Summary:**\n\n"
+            total_count = 0
+            
+            for resource_type, resources in result.items():
+                if isinstance(resources, list):
+                    count = len(resources)
+                    total_count += count
+                    summary += f"• {resource_type.capitalize()}: {count}\n"
+                elif "items" in str(resources):
+                    # Handle nested items structure
+                    try:
+                        if isinstance(resources, dict) and "items" in resources:
+                            count = len(resources["items"])
+                            total_count += count
+                            summary += f"• {resource_type.capitalize()}: {count}\n"
+                    except:
+                        summary += f"• {resource_type.capitalize()}: Data available\n"
+            
+            return f"{summary}\nTotal resources found: {total_count}"
+        
+        # Jenkins-style responses
+        if "jobs" in result:
+            jobs = result["jobs"]
+            if jobs:
+                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
+            else:
+                return "No Jenkins jobs found."
+        
+        # ArgoCD-style responses
+        if "applications" in result:
+            apps = result["applications"]
+            if apps:
+                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
+            else:
+                return "No ArgoCD applications found."
     
+    # Generic fallback
     if result:
-        return f"Operation completed successfully. Result: {result}"
+        return f"Operation completed successfully. Found data across all namespaces."
     
-    return "Operation completed successfully."
+    return "Operation completed successfully, but no data was returned."
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
     """Extract cluster name/size from Gemini answer and store in session."""
     try:
+        # Extract cluster name
         if "cluster name" in user_input.lower():
             patterns = [
                 r"cluster[^\w]*([\w-]+)",
                 r"name[^\w][:\-]?[^\w]([\w-]+)",
-                r"\*([\w-]+)\*",
+                r"\*([\w-]+)\*",  # bolded name
             ]
             for pattern in patterns:
                 match = re.search(pattern, answer, re.IGNORECASE)
@@ -445,12 +559,13 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
                     st.session_state.last_known_cluster_name = cluster_name
                     break
 
+        # Extract cluster size
         if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
             numbers = re.findall(r'\b\d+\b', answer)
             if numbers:
                 st.session_state.last_known_cluster_size = int(numbers[0])
     except Exception:
-        pass
+        pass  # silent fail
 
 # ---------------- STREAMLIT APP ----------------
 def main():
@@ -461,6 +576,7 @@ def main():
     with st.sidebar:
         st.header("⚙️ Settings")
         
+        # Server discovery
         if st.button("Discover Available Servers"):
             with st.spinner("Discovering MCP servers..."):
                 st.success(f"Found {len(SERVERS)} servers")
@@ -528,7 +644,8 @@ def main():
         
         # Special handling for "all resources" request
         if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
+            ("all" in user_prompt.lower() and "resource" in user_prompt.lower()) or
+            "ella resource" in user_prompt.lower()):
             with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
                 all_resources = get_all_cluster_resources(selected_server["url"])
                 resp = {"result": all_resources}
@@ -551,16 +668,20 @@ def main():
         helpful_response = (
             "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
             "**For Kubernetes:**\n"
-            "- \"Create namespace efk\"\n"
-            "- \"List all namespaces\"\n"
-            "- \"Show all pods in all namespaces\"\n"
+            "- \"List all pods in all namespaces\"\n"
+            "- \"Show all services across all namespaces\"\n"
             "- \"Get cluster nodes\"\n"
-            "- \"List all secrets\"\n\n"
+            "- \"List all secrets in all namespaces\"\n"
+            "- \"Show all resources in cluster\"\n"
+            "- \"create ns <namespace-name>\" (to create a namespace)\n"
+            "- \"create namespace <namespace-name>\" (to create a namespace)\n\n"
             "**For Jenkins:**\n"
-            "- \"List all jobs\"\n\n"
+            "- \"List all jobs\"\n"
+            "- \"Show build status\"\n\n"
             "**For ArgoCD:**\n"
-            "- \"List applications\"\n\n"
-            "Or try being more specific about what you'd like to do!"
+            "- \"List applications\"\n"
+            "- \"Show application status\"\n\n"
+            "Or try being more specific about what you'd like to see!"
         )
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
