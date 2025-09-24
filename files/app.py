@@ -57,9 +57,9 @@ def gateway_call(target: str,
                  timeout: int = 30) -> Dict[str, Any]:
     """
     Call API_URL/mcp?target=<target> with JSON-RPC body.
-    Sends session_id in Authorization header for authentication.
+    For YOUR auth gateway: session_id must be in JSON body (not header)!
     """
-    url = f"{API_URL}/mcp?target={target}"  # Points to AUTH gateway
+    url = f"{API_URL}/mcp?target={target}"
     body = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -67,13 +67,12 @@ def gateway_call(target: str,
         "params": params or {}
     }
     
-    # CRITICAL FIX: Send session token in Authorization header
-    headers = {"Content-Type": "application/json"}
+    # CRITICAL FIX: Add session_id to JSON body (not header!)
     if session_id:
-        headers["Authorization"] = f"Bearer {session_id}"
+        body["session_id"] = session_id  # Your gateway expects this!
     
     try:
-        response = requests.post(url, json=body, headers=headers, timeout=timeout)
+        response = requests.post(url, json=body, timeout=timeout)
         response.raise_for_status()
         
         # Handle different response formats
@@ -100,7 +99,6 @@ def gateway_call(target: str,
         return {"error": f"Gateway request failed: {str(e)}"}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
-
 # ---------------- HELPERS ----------------
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Fix arguments before sending to MCP tools via gateway."""
