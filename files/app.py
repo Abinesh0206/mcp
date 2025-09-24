@@ -143,6 +143,7 @@ def sanitize_args(args: dict):
     # Handle common Kubernetes resource types
     resource_mappings = {
         "ns": "namespaces",
+        "namespace": "namespaces",
         "pod": "pods",
         "node": "nodes",
         "deploy": "deployments",
@@ -194,7 +195,8 @@ def detect_server_from_query(query: str, available_servers: list) -> Optional[Di
                  "deployment" in query_lower or "service" in query_lower or
                  "secret" in query_lower or "configmap" in query_lower or
                  "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower) and 
+                 "resource" in query_lower or "create" in query_lower or
+                 "delete" in query_lower) and 
                 ("kubernetes" in server_name or "k8s" in server_name)):
                 return server
                 
@@ -251,6 +253,20 @@ def get_all_cluster_resources(server_url: str):
     
     return all_resources
 
+def create_namespace_manifest(namespace_name: str) -> dict:
+    """Create a basic namespace manifest for creation."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace_name,
+            "labels": {
+                "name": namespace_name,
+                "created-by": "masaops-bot"
+            }
+        }
+    }
+
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
@@ -276,6 +292,11 @@ IMPORTANT RULES FOR KUBERNETES:
 - When user wants to see resources across all namespaces, use allNamespaces=true
 - For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
 - For nodes and namespaces, don't use namespace parameters
+- For namespace creation commands like "create namespace X" or "create ns X", use kubectl_create with resourceType: "namespace" and provide a manifest
+
+SPECIAL HANDLING FOR NAMESPACE CREATION:
+- If user wants to create a namespace (e.g., "create namespace myns", "create ns myns"), use kubectl_create
+- The arguments should include: resourceType: "namespace" and manifest with the namespace definition
 
 Rules:
 - Only choose from the tools above.
@@ -287,8 +308,24 @@ Respond ONLY in strict JSON:
 {{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
 """
     if not GEMINI_AVAILABLE:
-        # FIX 3: Enhanced fallback logic for all-namespace requests
+        # Enhanced fallback logic
         query_lower = query.lower()
+        
+        # Handle namespace creation
+        if "create namespace" in query_lower or "create ns" in query_lower:
+            # Extract namespace name from query
+            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', query_lower)
+            if namespace_match:
+                namespace_name = namespace_match.group(1)
+                manifest = create_namespace_manifest(namespace_name)
+                return {
+                    "tool": "kubectl_create",
+                    "args": {
+                        "resourceType": "namespace",
+                        "manifest": manifest
+                    },
+                    "explanation": f"Creating namespace '{namespace_name}' with basic manifest"
+                }
         
         # Handle "all pods in all namespaces" requests
         if any(phrase in query_lower for phrase in ["all pods", "all pod", "all namespace", "all namespaces", "ella pod", "ella namespace"]):
@@ -327,6 +364,12 @@ Respond ONLY in strict JSON:
                 "args": {"resourceType": "nodes"},
                 "explanation": "User wants to see all nodes"
             }
+        elif "namespaces" in query_lower or "namespace" in query_lower:
+            return {
+                "tool": "kubectl_get",
+                "args": {"resourceType": "namespaces"},
+                "explanation": "User wants to see all namespaces"
+            }
         else:
             return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
     
@@ -344,6 +387,19 @@ Respond ONLY in strict JSON:
         
         if not parsed:
             parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
+        
+        # Special handling for namespace creation
+        if (parsed.get("tool") == "kubectl_create" and 
+            parsed.get("args", {}).get("resourceType") == "namespace" and
+            "manifest" not in parsed.get("args", {})):
+            
+            # Extract namespace name from query for fallback
+            query_lower = query.lower()
+            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', query_lower)
+            if namespace_match:
+                namespace_name = namespace_match.group(1)
+                parsed["args"]["manifest"] = create_namespace_manifest(namespace_name)
+                parsed["explanation"] = f"Creating namespace '{namespace_name}' with generated manifest"
         
         parsed["args"] = sanitize_args(parsed.get("args") or {})
         return parsed
@@ -375,6 +431,7 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
             "- If cluster name or size was inferred, mention that explicitly.\n"
             "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
+            "- For namespace creation, confirm successful creation or explain any issues.\n"
             "- NEVER show JSON, code, or internal errors to user unless asked.\n"
             "- Be helpful, friendly, and precise."
         )
@@ -400,6 +457,16 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     
     result = raw_response.get("result", {})
     
+    # Handle namespace creation response
+    if "create" in user_input.lower() and "namespace" in user_input.lower():
+        if "error" not in raw_response:
+            # Extract namespace name from query
+            namespace_match = re.search(r'(?:create\s+(?:namespace|ns)\s+)(\w+)', user_input.lower())
+            namespace_name = namespace_match.group(1) if namespace_match else "the requested"
+            return f"✅ Successfully created namespace '{namespace_name}'!"
+        else:
+            return f"❌ Failed to create namespace. The error was: {raw_response.get('error', 'Unknown error')}"
+    
     # Handle different response formats
     if isinstance(result, dict):
         # Kubernetes-style responses with items
@@ -422,7 +489,7 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     return "No namespaces found."
             
             if "pod" in user_input.lower():
-                # FIX 4: Show namespace information for pods
+                # Show namespace information for pods
                 pods_info = []
                 for item in items:
                     name = item.get('metadata', {}).get('name', 'unnamed')
@@ -480,7 +547,10 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
             else:
                 return "No ArgoCD applications found."
     
-    # Generic fallback
+    # Generic fallback for successful operations
+    if "create" in user_input.lower() and not raw_response.get("error"):
+        return "✅ Operation completed successfully!"
+    
     if result:
         return f"Operation completed successfully. Found data across all namespaces."
     
@@ -616,7 +686,9 @@ def main():
             "- \"Show all services across all namespaces\"\n"
             "- \"Get cluster nodes\"\n"
             "- \"List all secrets in all namespaces\"\n"
-            "- \"Show all resources in cluster\"\n\n"
+            "- \"Show all resources in cluster\"\n"
+            "- \"Create namespace my-namespace\"\n"
+            "- \"Delete namespace my-namespace\"\n\n"
             "**For Jenkins:**\n"
             "- \"List all jobs\"\n"
             "- \"Show build status\"\n\n"
