@@ -10,7 +10,7 @@ import re
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # do NOT hardcode API keys; set via env
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")  # do NOT hardcode API keys; set via env
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 SERVERS_FILE = os.getenv("SERVERS_FILE", "servers.json")
 
