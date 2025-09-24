@@ -7,7 +7,7 @@
     },
     {
       "name": "kubernetes",
-      "url": "http://13.222.157.210:3000/mcp?target=kubernetes",
+      "url": "http://13.222.157.210:3000/mcp",
       "description": "Kubernetes via Gateway"
     },
     {
