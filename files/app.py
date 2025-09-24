@@ -107,36 +107,27 @@ def call_tool(server_url: str, name: str, arguments: dict):
 
 
 def sanitize_args(args: dict):
-    """Normalize incoming args. Crucial change: do NOT default pods to namespace 'default'.
-    If namespace not provided for namespaced resources, treat as allNamespaces=True so "all pods" actually means cluster-wide.
-    Also accept "all" keyword for namespace.
-    """
     if not args:
         return {}
 
     fixed = args.copy()
 
-    # Handle resource/resourceType naming
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
 
-    # If user explicitly specified namespace="all", convert
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
 
-    # If resourceType is 'all', set allNamespaces true
     if fixed.get("resourceType") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("resourceType", None)
 
-    # If user didn't supply namespace for a namespaced resource (like pods), interpret as all namespaces.
     namespaced_resources = {"pods", "services", "deployments", "configmaps", "secrets"}
     rt = fixed.get("resourceType")
     if rt in namespaced_resources and "namespace" not in fixed and not fixed.get("allNamespaces"):
         fixed["allNamespaces"] = True
 
-    # Short form mappings
     resource_mappings = {
         "ns": "namespaces",
         "pod": "pods",
@@ -396,10 +387,10 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
 def extract_and_store_cluster_info(user_input: str, answer: str):
     try:
         if "cluster name" in user_input.lower():
-           patterns = [
-               r"cluster[^\w]*([\w-]+)",
-               r'name[^\w][:\-]?[^"]?([\w-]+)',
-               r"\*([\w-]+)\*",
+            patterns = [
+                r"cluster[^\w]*([\w-]+)",
+                r'name[^\w][:\-]?[^\"]?([\w-]+)',
+                r"\*([\w-]+)\*",
             ]
             for pattern in patterns:
                 match = re.search(pattern, answer, re.IGNORECASE)
@@ -408,111 +399,3 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
                     st.session_state.last_known_cluster_name = cluster_name
                     break
         if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
-            numbers = re.findall(r'\b\d+\b', answer)
-            if numbers:
-                st.session_state.last_known_cluster_size = int(numbers[0])
-    except Exception:
-        pass
-
-# ---------------- STREAMLIT APP ----------------
-def main():
-    st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 MaSaOps Bot")
-
-    with st.sidebar:
-        st.header("⚙️ Settings")
-        if st.button("Discover Available Servers"):
-            with st.spinner("Discovering MCP servers..."):
-                st.success(f"Found {len(SERVERS)} servers")
-                for server in SERVERS:
-                    st.write(f"• {server['name']}: {server['url']}")
-        st.text_input("Gemini API Key", value=(GEMINI_API_KEY or ""), disabled=True, type="password")
-        if st.button("Clear Chat History"):
-            st.session_state.messages = []
-            st.rerun()
-
-    st.subheader("What's on your mind today? 🤔")
-
-    for msg in st.session_state.messages:
-        role = msg.get("role", "assistant")
-        with st.chat_message(role):
-            st.markdown(msg.get("content", ""))
-
-    user_prompt = st.chat_input("Ask anything about your infrastructure...")
-    if not user_prompt:
-        return
-
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
-    with st.chat_message("user"):
-        st.markdown(user_prompt)
-
-    with st.spinner("🔍 Finding the right server for your query..."):
-        selected_server = detect_server_from_query(user_prompt, SERVERS)
-
-    if not selected_server:
-        error_msg = "No MCP servers available. Please check your servers.json file or SERVERS_FILE env var."
-        st.session_state.messages.append({"role": "assistant", "content": error_msg})
-        with st.chat_message("assistant"):
-            st.error(error_msg)
-        return
-
-    server_info = f"🤖 Using server: **{selected_server['name']}**"
-    st.session_state.messages.append({"role": "assistant", "content": server_info})
-    with st.chat_message("assistant"):
-        st.markdown(server_info)
-
-    with st.spinner("🤔 Analyzing your request..."):
-        decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
-
-    explanation = decision.get("explanation", "I'm figuring out how to help you...")
-    st.session_state.messages.append({"role": "assistant", "content": f"💡 {explanation}"})
-    with st.chat_message("assistant"):
-        st.markdown(f"💡 {explanation}")
-
-    tool_name = decision.get("tool")
-    tool_args = sanitize_args(decision.get("args") or {})
-
-    if tool_name:
-        with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}`...")
-
-        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
-            with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
-                all_resources = get_all_cluster_resources(selected_server["url"])
-                resp = {"result": all_resources}
-        else:
-            with st.spinner("🔄 Processing your request..."):
-                resp = call_tool(selected_server["url"], tool_name, tool_args)
-
-        with st.spinner("📝 Formatting response..."):
-            final_answer = ask_gemini_answer(user_prompt, resp)
-
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
-        with st.chat_message("assistant"):
-            st.markdown(final_answer)
-
-    else:
-        helpful_response = (
-            "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
-            "**For Kubernetes:**\n"
-            "- \"List all namespaces\"\n"
-            "- \"Show running pods\"\n"
-            "- \"Get cluster nodes\"\n"
-            "- \"Show all services\"\n"
-            "- \"List all secrets\"\n"
-            "- \"Show all resources in cluster\"\n\n"
-            "**For Jenkins:**\n"
-            "- \"List all jobs\"\n"
-            "- \"Show build status\"\n\n"
-            "**For ArgoCD:**\n"
-            "- \"List applications\"\n"
-            "- \"Show application status\"\n\n"
-            "Or try being more specific about what you'd like to see!"
-        )
-
-        st.session_state.messages.append({"role": "assistant", "content": helpful_response})
-        with st.chat_message("assistant"):
-            st.markdown(helpful_response)
-
-if __name__ == "__main__":
-    main()
