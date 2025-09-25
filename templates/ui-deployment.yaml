@@ -47,7 +47,8 @@ spec:
             - |
               pip install --no-cache-dir -r /app/requirements.txt && \
               pip install --no-cache-dir google-generativeai pyyaml && \
-              streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0
+              streamlit run /app/login.py --server.port 8501 --server.address 0.0.0.0 & \
+              streamlit run /app/app.py --server.port 8502 --server.address 0.0.0.0
       volumes:
         - name: code
           configMap:
