@@ -1,4 +1,6 @@
-import os 
+#!/usr/bin/env python3
+# patched_mcp_client.py
+import os
 import json
 import time
 import re
@@ -17,7 +19,7 @@ except Exception:
 # ---------------- CONFIG ----------------
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")  # Auth gateway URL
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_AVAILABLE = False
 
@@ -30,7 +32,6 @@ if genai and GEMINI_API_KEY:
 
 # ---------------- SERVERS ----------------
 def load_servers_from_file() -> List[Dict[str, Any]]:
-    """Load servers list from servers.json or fallback to sensible defaults."""
     try:
         with open("servers.json", "r") as f:
             data = json.load(f)
@@ -39,7 +40,6 @@ def load_servers_from_file() -> List[Dict[str, Any]]:
                 return servers
     except Exception:
         pass
-    # Fallback defaults
     return [
         {"name": "jenkins", "url": f"{API_URL}/mcp", "description": "Jenkins"},
         {"name": "kubernetes", "url": f"{API_URL}/mcp", "description": "Kubernetes"},
@@ -51,50 +51,29 @@ SERVER_NAMES = [s.get("name") for s in SERVERS]
 
 # ---------------- HELPERS ----------------
 def sanitize_args(args: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Fix arguments before sending to MCP tools via gateway."""
     if not args:
         return {}
-
     fixed = dict(args)
-    
-    # Handle resource/resourceType naming
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
-    
-    # Handle "all namespaces" request
     if fixed.get("namespace") == "all":
         fixed["allNamespaces"] = True
         fixed.pop("namespace", None)
-    
-    # Handle "all resources" request
     if fixed.get("resourceType") == "all":
         fixed["allResources"] = True
         fixed.pop("resourceType", None)
-    
-    # Handle common Kubernetes resource types
     resource_mappings = {
-        "ns": "namespaces",
-        "pod": "pods",
-        "node": "nodes",
-        "deploy": "deployments",
-        "svc": "services",
-        "cm": "configmaps",
-        "secret": "secrets",
-        "all": "all"
+        "ns": "namespaces", "pod": "pods", "node": "nodes", "deploy": "deployments",
+        "svc": "services", "cm": "configmaps", "secret": "secrets", "all": "all"
     }
-    
     if fixed.get("resourceType") in resource_mappings:
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
-    
-    # Auto-set allNamespaces for resources that support it
-    if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"] and 
-        "namespace" not in fixed):
+    if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"]
+        and "namespace" not in fixed):
         fixed["allNamespaces"] = True
-    
     return fixed
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
-    """Extract JSON object from free text."""
     try:
         start = text.find("{")
         end = text.rfind("}") + 1
@@ -104,71 +83,95 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
         pass
     return None
 
-# ---------------- SERVER DETECTION ----------------
-def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
-    """Automatically detect which server to use based on query content."""
-    query_lower = query.lower()
-    
-    # Check each server's tools to see which one matches the query
-    for server in available_servers:
-        try:
-            tools = list_mcp_tools_for_server(server["name"])
-            tool_names = [t.lower() for t in tools]
-            
-            # Check if any tool name is mentioned in the query
-            for tool_name in tool_names:
-                if tool_name in query_lower:
-                    return server
-            
-            # Check for common keywords that match server types
-            server_name = server["name"].lower()
-            
-            # Kubernetes queries
-            if (("kubernetes" in query_lower or "k8s" in query_lower or 
-                 "pod" in query_lower or "namespace" in query_lower or
-                 "deployment" in query_lower or "service" in query_lower or
-                 "secret" in query_lower or "configmap" in query_lower or
-                 "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower or "create" in query_lower or
-                 "delete" in query_lower) and 
-                ("kubernetes" in server_name or "k8s" in server_name)):
-                return server
-                
-            # Jenkins queries
-            if (("jenkins" in query_lower or "job" in query_lower or 
-                 "build" in query_lower or "pipeline" in query_lower) and 
-                "jenkins" in server_name):
-                return server
-                
-            # ArgoCD queries
-            if (("argocd" in query_lower or "application" in query_lower or 
-                 "gitops" in query_lower or "sync" in query_lower) and 
-                "argocd" in server_name):
-                return server
-                
-        except Exception:
-            continue
-    
-    # If no specific server detected, return the first available one
-    return available_servers[0] if available_servers else None
+# ---------------- HTTP helpers (AUTH placement) ----------------
+def build_auth_headers_and_cookies(session_id: Optional[str]) -> Dict[str, Any]:
+    headers = {}
+    cookies = {}
+    if session_id:
+        headers["Authorization"] = f"Bearer {session_id}"
+        # Some gateways expect custom header names; include one more popular header just in case:
+        headers["X-Session-Id"] = session_id
+        cookies["session_id"] = session_id
+    headers["Content-Type"] = "application/json"
+    return {"headers": headers, "cookies": cookies}
+
+# ---------------- CALL TOOL ----------------
+def call_tool(server_name: str, name: str, arguments: dict, session_id: Optional[str]):
+    """Execute MCP tool by name with arguments via gateway. Sends session as header + cookie + json."""
+    if not name or not isinstance(arguments, dict):
+        return {"error": "Invalid tool name or arguments"}
+
+    rpc_body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": arguments
+        },
+        # keep session_id in body for compatibility
+        "session_id": session_id
+    }
+
+    url = f"{API_URL}/mcp?target={server_name}"
+    auth = build_auth_headers_and_cookies(session_id)
+    try:
+        resp = requests.post(url, json=rpc_body, headers=auth["headers"], cookies=auth["cookies"], timeout=20)
+        # Helpful debugging when something goes wrong
+        if resp.status_code == 401:
+            return {"error": f"Gateway returned 401 Unauthorized. Check login/session token. Response: {resp.text}"}
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": f"Gateway request failed: {str(e)}"}
+
+# ---------------- LIST TOOLS ----------------
+def list_mcp_tools_for_server(server_name: str, session_id: Optional[str] = None) -> List[str]:
+    """List tools by calling gateway tools/list on that server name."""
+    rpc_body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {},
+        "session_id": session_id
+    }
+    url = f"{API_URL}/mcp?target={server_name}"
+    auth = build_auth_headers_and_cookies(session_id)
+    try:
+        resp = requests.post(url, json=rpc_body, headers=auth["headers"], cookies=auth["cookies"], timeout=10)
+        if resp.status_code == 401:
+            # return empty and let caller know
+            return []
+        resp.raise_for_status()
+        result = resp.json()
+        if isinstance(result, dict):
+            tools = result.get("result", {}).get("tools") or result.get("result", [])
+        elif isinstance(result, list):
+            tools = result
+        else:
+            tools = []
+        names = []
+        for t in tools:
+            if isinstance(t, dict) and t.get("name"):
+                names.append(t["name"])
+            elif isinstance(t, str):
+                names.append(t)
+        return names
+    except Exception:
+        return []
 
 # ---------------- GET ALL RESOURCES ----------------
-def get_all_cluster_resources(server_name: str, session_id: str):
-    """Get all resources in the cluster by querying multiple resource types via gateway."""
+def get_all_cluster_resources(server_name: str, session_id: Optional[str]):
     resource_types = [
-        "pods", "services", "deployments", "configmaps", 
+        "pods", "services", "deployments", "configmaps",
         "secrets", "namespaces", "nodes"
     ]
-    
     all_resources = {}
-    
     for resource_type in resource_types:
         try:
             params = {"resourceType": resource_type}
             if resource_type not in ["namespaces", "nodes"]:
                 params["allNamespaces"] = True
-            
-            # FIXED: Use correct JSON structure with session_id at top level
             rpc_body = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -179,366 +182,41 @@ def get_all_cluster_resources(server_name: str, session_id: str):
                 },
                 "session_id": session_id
             }
-            
             url = f"{API_URL}/mcp?target={server_name}"
-            response = requests.post(url, json=rpc_body, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if isinstance(result, dict) and "result" in result:
-                    all_resources[resource_type] = result["result"]
-                else:
-                    all_resources[resource_type] = result
+            auth = build_auth_headers_and_cookies(session_id)
+            response = requests.post(url, json=rpc_body, headers=auth["headers"], cookies=auth["cookies"], timeout=30)
+            if response.status_code == 401:
+                all_resources[resource_type] = "Error: 401 Unauthorized (check session/login)"
+                continue
+            if response.status_code != 200:
+                all_resources[resource_type] = f"Error: HTTP {response.status_code} - {response.text}"
+                continue
+            result = response.json()
+            if isinstance(result, dict) and "result" in result:
+                all_resources[resource_type] = result["result"]
             else:
-                all_resources[resource_type] = f"Error: HTTP {response.status_code}"
-                
-            time.sleep(0.1)
-            
+                all_resources[resource_type] = result
+            time.sleep(0.05)
         except Exception as e:
             all_resources[resource_type] = f"Exception: {str(e)}"
-    
     return all_resources
-
-# ---------------- TOOL CALL ----------------
-def call_tool(server_name: str, name: str, arguments: dict, session_id: str):
-    """Execute MCP tool by name with arguments via gateway."""
-    if not name or not isinstance(arguments, dict):
-        return {"error": "Invalid tool name or arguments"}
-    
-    # FIXED: Create full JSON-RPC body with session_id at top level
-    rpc_body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": name,
-            "arguments": arguments
-        },
-        "session_id": session_id  # CRITICAL: session_id at top level for your auth gateway
-    }
-    
-    url = f"{API_URL}/mcp?target={server_name}"
-    try:
-        response = requests.post(url, json=rpc_body, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Gateway request failed: {str(e)}"}
-
-# ---------------- LIST TOOLS ----------------
-def list_mcp_tools_for_server(server_name: str) -> List[str]:
-    """List tools by calling gateway tools/list on that server name."""
-    try:
-        # FIXED: Use correct format for tools/list
-        rpc_body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {},
-            "session_id": "dummy"  # tools/list doesn't require auth, but gateway expects session_id
-        }
-        
-        url = f"{API_URL}/mcp?target={server_name}"
-        response = requests.post(url, json=rpc_body, timeout=10)
-        response.raise_for_status()
-        
-        result = response.json()
-        if isinstance(result, dict):
-            tools = result.get("result", {}).get("tools") or result.get("result", [])
-        elif isinstance(result, list):
-            tools = result
-        else:
-            tools = []
-            
-        names = []
-        for t in tools:
-            if isinstance(t, dict) and t.get("name"):
-                names.append(t["name"])
-            elif isinstance(t, str):
-                names.append(t)
-                
-        return names
-    except Exception:
-        return []
-
-# ---------------- GEMINI: pick tool + args ----------------
-def ask_gemini_for_tool_decision(query: str, server_name: str, retries: int = 2) -> Dict[str, Any]:
-    """Use Gemini to map user query to tool name and arguments via gateway."""
-    available_tools = list_mcp_tools_for_server(server_name)
-
-    # Enhanced fallback logic
-    def heuristic():
-        q = query.lower()
-        candidate = {"tool": None, "args": {}, "explanation": "Used local heuristic fallback."}
-        
-        # Handle namespace creation
-        if any(word in q for word in ["create namespace", "create ns", "make namespace"]):
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', q)
-            if namespace_match:
-                namespace_name = namespace_match.group(1)
-                return {
-                    "tool": "kubectl_create",
-                    "args": {"resourceType": "namespaces", "name": namespace_name},
-                    "explanation": f"Creating namespace '{namespace_name}'"
-                }
-        
-        # Handle namespace deletion
-        if any(word in q for word in ["delete namespace", "delete ns", "remove namespace"]):
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', q)
-            if namespace_match:
-                namespace_name = namespace_match.group(1)
-                return {
-                    "tool": "kubectl_delete",
-                    "args": {"resourceType": "namespaces", "name": namespace_name},
-                    "explanation": f"Deleting namespace '{namespace_name}'"
-                }
-        
-        # Handle "all resources" requests
-        if any(phrase in q for phrase in ["all pods", "all resources", "everything", "all namespaces"]):
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "all", "allNamespaces": True},
-                "explanation": "User wants to see all resources across all namespaces"
-            }
-        elif "pods" in q or "pod" in q:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods across all namespaces"
-            }
-        elif "services" in q or "svc" in q:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "services", "allNamespaces": True},
-                "explanation": "User wants to see all services across all namespaces"
-            }
-        elif "nodes" in q:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "nodes"},
-                "explanation": "User wants to see all nodes"
-            }
-        else:
-            return {"tool": None, "args": {}, "explanation": "No specific tool matched"}
-
-    if not GEMINI_AVAILABLE:
-        return heuristic()
-
-    # Build instruction for Gemini
-    instruction = f"""
-You are an assistant that maps a user's query to a tool name and args.
-User query: "{query}"
-Available tools for server '{server_name}': {json.dumps(available_tools, indent=2)}
-
-IMPORTANT RULES FOR KUBERNETES:
-- When user asks for "all pods", "show all pods", or similar, ALWAYS set allNamespaces=true
-- When user wants to see resources across all namespaces, use allNamespaces=true
-- For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
-- For nodes and namespaces, don't use namespace parameters
-- For creating namespaces: use kubectl_create with resourceType: "namespaces" and name: "<namespace_name>"
-- For deleting namespaces: use kubectl_delete with resourceType: "namespaces" and name: "<namespace_name>"
-
-Rules:
-- Only choose tools from the available list above.
-- Respond in strict JSON: {{"tool": "<tool_name_or_null>", "args": {{...}} | null, "explanation": "short"}}
-If unsure, set tool to null.
-"""
-    for attempt in range(retries):
-        try:
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            resp = model.generate_content(instruction)
-            text = getattr(resp, "text", str(resp)).strip()
-            parsed = None
-            
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                parsed = _extract_json_from_text(text)
-                
-            if not isinstance(parsed, dict):
-                return heuristic()
-                
-            # sanitize
-            parsed["args"] = sanitize_args(parsed.get("args") or {})
-            
-            # validate tool exists
-            tool = parsed.get("tool")
-            if tool and tool not in available_tools:
-                parsed["explanation"] = f"Tool '{tool}' not available on server '{server_name}'."
-                parsed["tool"] = None
-                
-            return parsed
-        except Exception:
-            time.sleep(1)
-            continue
-            
-    return heuristic()
-
-# ---------------- GEMINI: friendly answer ----------------
-def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
-    """Ask Gemini to turn raw gateway response into human-friendly answer."""
-    if not GEMINI_AVAILABLE:
-        return generate_fallback_answer(user_input, raw_response)
-    
-    try:
-        context_notes = ""
-        if "last_known_cluster_name" in st.session_state:
-            context_notes += f"\nPreviously known cluster: {st.session_state['last_known_cluster_name']}"
-        if "last_known_cluster_size" in st.session_state:
-            context_notes += f"\nPreviously known cluster size: {st.session_state['last_known_cluster_size']}"
-
-        prompt = (
-            f"User asked: {user_input}\n"
-            f"Context: {context_notes}\n"
-            f"Raw system response:\n{json.dumps(raw_response, indent=2)}\n"
-            "INSTRUCTIONS:\n"
-            "- Respond in clear, natural, conversational English.\n"
-            "- If it's a list, format with bullet points.\n"
-            "- If it's status, explain health and issues clearly.\n"
-            "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
-            "- If cluster name or size was inferred, mention that explicitly.\n"
-            "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
-            "- NEVER show JSON, code, or internal errors to user unless asked.\n"
-            "- Be helpful, friendly, and precise.\n"
-        )
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        resp = model.generate_content(prompt)
-        answer = getattr(resp, "text", str(resp)).strip()
-        
-        # try to extract cluster info
-        extract_and_store_cluster_info(user_input, answer)
-        return answer
-    except Exception:
-        return generate_fallback_answer(user_input, raw_response)
-
-def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
-    """Generate human-friendly answer without Gemini."""
-    if "error" in raw_response:
-        error_msg = raw_response["error"]
-        
-        # Handle namespace creation errors
-        if "create" in user_input.lower() and "namespace" in user_input.lower():
-            if "already exists" in error_msg.lower():
-                return "This namespace already exists in the cluster."
-            elif "forbidden" in error_msg.lower() or "permission" in error_msg.lower():
-                return "I don't have permission to create namespaces. Please check your Kubernetes RBAC permissions."
-            else:
-                return f"Sorry, I couldn't create the namespace: {error_msg}"
-        
-        if "cluster" in user_input.lower():
-            return "I couldn't retrieve the cluster information right now. Please check if the gateway server is running and accessible."
-        return f"Sorry, I encountered an issue: {error_msg}"
-
-    result = raw_response.get("result", {})
-
-    # Handle different response formats
-    if isinstance(result, dict):
-        # Kubernetes-style responses with items
-        if "items" in result:
-            items = result["items"]
-            count = len(items)
-            
-            if "node" in user_input.lower() or "cluster size" in user_input.lower():
-                if count == 1:
-                    node_name = items[0].get("metadata", {}).get("name", "unknown")
-                    return f"This is a single-node cluster. The node is named: {node_name}"
-                else:
-                    return f"The cluster has {count} nodes."
-            
-            if "namespace" in user_input.lower():
-                namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
-                if namespaces:
-                    return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
-                else:
-                    return "No namespaces found."
-            
-            if "pod" in user_input.lower():
-                pods_info = []
-                for item in items:
-                    name = item.get('metadata', {}).get('name', 'unnamed')
-                    namespace = item.get('metadata', {}).get('namespace', 'default')
-                    status = item.get('status', {}).get('phase', 'Unknown')
-                    pods_info.append(f"{name} (Namespace: {namespace}, Status: {status})")
-                
-                if pods_info:
-                    return f"Found {count} pods across all namespaces:\n" + "\n".join([f"• {pod}" for pod in pods_info])
-                else:
-                    return "No pods found in any namespace."
-
-        # Handle all-resources response
-        if any(key in result for key in ["pods", "services", "deployments", "configmaps", "secrets", "namespaces", "nodes"]):
-            summary = "**Cluster Resources Summary:**\n\n"
-            total_count = 0
-            
-            for resource_type, resources in result.items():
-                if isinstance(resources, list):
-                    count = len(resources)
-                    total_count += count
-                    summary += f"• {resource_type.capitalize()}: {count}\n"
-            
-            return f"{summary}\nTotal resources found: {total_count}"
-        
-        # Jenkins-style responses
-        if "jobs" in result:
-            jobs = result["jobs"]
-            if jobs:
-                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
-            else:
-                return "No Jenkins jobs found."
-        
-        # ArgoCD-style responses
-        if "applications" in result:
-            apps = result["applications"]
-            if apps:
-                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
-            else:
-                return "No ArgoCD applications found."
-
-    # Generic fallback for successful operations
-    if result and not result.get("error"):
-        if "create" in user_input.lower():
-            return "✅ Operation completed successfully!"
-        elif "delete" in user_input.lower():
-            return "✅ Operation completed successfully!"
-        else:
-            return "✅ Operation completed successfully. Found data across all namespaces."
-    
-    return "Operation completed, but no specific data was returned."
-
-def extract_and_store_cluster_info(user_input: str, answer: str):
-    """Extract cluster name/size from answer and store in session."""
-    try:
-        # Extract cluster name
-        if "cluster name" in user_input.lower():
-            patterns = [
-                r"cluster[^\w]*([\w-]+)",
-                r"name[^\w][:\-]?[^\w]([\w-]+)",
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, answer, re.IGNORECASE)
-                if match:
-                    cluster_name = match.group(1).strip()
-                    st.session_state["last_known_cluster_name"] = cluster_name
-                    break
-
-        # Extract cluster size
-        if "cluster size" in user_input.lower() or "how many nodes" in user_input.lower():
-            numbers = re.findall(r'\b\d+\b', answer)
-            if numbers:
-                st.session_state["last_known_cluster_size"] = int(numbers[0])
-    except Exception:
-        pass
 
 # ---------------- AUTH (login) ----------------
 def attempt_login(username: str, password: str) -> Dict[str, Any]:
     try:
-        response = requests.post(f"{API_URL}/login", json={"username": username, "password": password}, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        try:
-            return {"error": response.json()}
-        except Exception:
-            return {"error": response.text}
+        url = f"{API_URL}/login"
+        resp = requests.post(url, json={"username": username, "password": password}, timeout=10)
+        if resp.status_code != 200:
+            return {"error": f"Login failed HTTP {resp.status_code}: {resp.text}"}
+        data = resp.json()
+        # Expecting session_id in response
+        if not data.get("session_id"):
+            # Try common alternatives
+            if data.get("session"):
+                data["session_id"] = data.get("session")
+            elif data.get("token"):
+                data["session_id"] = data.get("token")
+        return data
     except Exception as e:
         return {"error": str(e)}
 
