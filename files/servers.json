@@ -1,19 +1,19 @@
 {
   "servers": [
     {
-      "name": "jenkins",
-      "url": "http://3.80.48.199:8080/mcp?target=jenkins",
-      "description": "Jenkins via Gateway"
+      "name": "kubernetes-mcp",
+      "url": "http://13.221.252.52:3000/mcp",
+      "description": "Primary Kubernetes MCP server"
     },
     {
-      "name": "kubernetes",
+      "name": "argocd-mcp",
       "url": "http://13.222.157.210:3000/mcp",
-      "description": "Kubernetes via Gateway"
+      "description": "Development cluster MCP server"
     },
     {
-      "name": "argocd",
-      "url": "http://54.227.78.211:8083/mcp?target=argocd",
-      "description": "ArgoCD via Gateway"
+      "name": "jenkins-mcp",
+      "url": "http://54.227.78.211:8082/mcp",
+      "description": "Staging Kubernetes MCP server"
     }
   ]
 }
