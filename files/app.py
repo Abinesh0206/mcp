@@ -10,6 +10,19 @@ from typing import Optional, Dict, Any
 import re
 import yaml
 
+# Check authentication
+if "authenticated" not in st.session_state or not st.session_state.authenticated:
+    st.warning("Please login first")
+    st.stop()
+
+# Filter servers based on user permissions
+USER_PERMISSIONS = st.session_state.permissions
+SERVERS = [s for s in load_servers() if s["url"] in USER_PERMISSIONS]
+
+if not SERVERS:
+    st.error("You don't have access to any MCP servers. Contact admin.")
+    st.stop()
+
 # ---------------- CONFIG ----------------
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
