@@ -4,3 +4,4 @@ google-generativeai
 python-dotenv
 pymongo
 bcrypt
+certifi>=2024.0.0
