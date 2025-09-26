@@ -3,7 +3,7 @@ namespace: masabot
 ui:
   image:
     repository: python
-    tag: "3.11-slim"
+    tag: "3.11-bookworm"
     pullPolicy: IfNotPresent
   replicas: 1
   service:
