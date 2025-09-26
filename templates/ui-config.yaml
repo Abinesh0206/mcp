@@ -5,8 +5,6 @@ metadata:
 data:
   app.py: |
 {{ (.Files.Get "files/app.py") | indent 4 }}
-  login.py: |
-{{ (.Files.Get "files/login.py") | indent 4 }}
   requirements.txt: |
 {{ (.Files.Get "files/requirements.txt") | indent 4 }}
   mcp_config.json: |
