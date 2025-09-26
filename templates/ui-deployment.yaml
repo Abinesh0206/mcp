@@ -15,6 +15,7 @@ spec:
         app: masabot-ui
     spec:
       containers:
+        # --- MAIN UI CONTAINER ---
         - name: ui
           image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
           imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
@@ -48,6 +49,38 @@ spec:
               pip install --no-cache-dir -r /app/requirements.txt && \
               pip install --no-cache-dir google-generativeai pyyaml && \
               streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0
+
+        # --- LOGIN CONTAINER ---
+        - name: login
+          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"  # Same image for simplicity
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          env:
+            - name: MONGO_URI
+              value: "{{ .Values.login.env.MONGO_URI | default "mongodb+srv://vigneshkavi_db_user:admin123@mcp.cautaos.mongodb.net/mcp_auth?retryWrites=true&w=majority" }}"
+            - name: DB_NAME
+              value: "{{ .Values.login.env.DB_NAME | default "mcp_auth" }}"
+            {{- if .Values.mcp.useSecret }}
+            {{- range .Values.mcp.secretKeys }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.mcp.secretName }}
+                  key: {{ .name }}
+            {{- end }}
+            {{- end }}
+          ports:
+            - containerPort: 8502  # Login runs on different port
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          workingDir: /app
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              pip install --no-cache-dir -r /app/requirements.txt && \
+              pip install --no-cache-dir pymongo bcrypt python-dotenv && \
+              streamlit run /app/login.py --server.port 8502 --server.address 0.0.0.0
+
       volumes:
         - name: code
           configMap:
@@ -55,6 +88,8 @@ spec:
             items:
               - key: app.py
                 path: app.py
+              - key: login.py
+                path: login.py
               - key: requirements.txt
                 path: requirements.txt
               - key: mcp_config.json
