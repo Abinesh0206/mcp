@@ -1,7 +1,8 @@
-streamlit==1.36.0
-requests==2.32.3
-google-generativeai
-python-dotenv
+streamlit
 pymongo
 bcrypt
+python-dotenv
+pyyaml
+google-generativeai
 certifi>=2024.0.0
+requests
