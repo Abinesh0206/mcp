@@ -68,3 +68,8 @@ ollama:
     # Alternatives:
     #   mistral: "7b-instruct-v0.2-q4_0"
     #   llama3:  "8b-instruct-q4_K_M" (if GPU)
+# values.yaml
+login:
+  env:
+    MONGO_URI: "mongodb+srv://vigneshkavi_db_user:admin123@mcp.cautaos.mongodb.net/mcp_auth?retryWrites=true&w=majority"
+    DB_NAME: "mcp_auth"
