@@ -46,10 +46,15 @@ spec:
           command: ["/bin/sh","-c"]
           args:
             - |
+              # Install system CA certificates (critical for MongoDB Atlas TLS)
+              apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+              rm -rf /var/lib/apt/lists/* && \
+              # Install Python deps
               pip install --no-cache-dir -r /app/requirements.txt && \
-              pip install --no-cache-dir google-generativeai pyyaml && \
+              pip install --no-cache-dir google-generativeai pyyaml certifi pymongo bcrypt python-dotenv && \
+              # Run app
               streamlit run /app/app.py --server.port 8501 --server.address 0.0.0.0
-
+              
       volumes:
         - name: code
           configMap:
