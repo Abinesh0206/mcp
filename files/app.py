@@ -9,6 +9,7 @@ import google.generativeai as genai
 from typing import Optional, Dict, Any
 import pymongo
 import bcrypt
+import certifi
 import re
 import yaml
 
@@ -16,6 +17,15 @@ import yaml
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://vigneshkavi_db_user:admin123@mcp.cautaos.mongodb.net/mcp_auth?retryWrites=true&w=majority")
 DB_NAME = os.getenv("DB_NAME", "mcp_auth")
+
+@st.cache_resource
+def init_db():
+    client = pymongo.MongoClient(
+        MONGO_URI,
+        tlsCAFile=certifi.where()  # 👈 THIS FIXES THE SSL ERROR
+    )
+    db = client[DB_NAME]
+    return db
 
 # Initialize MongoDB
 @st.cache_resource
