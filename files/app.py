@@ -714,5 +714,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-"final error analysing code but namespace is not created in this code "
