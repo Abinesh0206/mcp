@@ -6,9 +6,8 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import re
-import yaml
 
 # ---------------- CONFIG ----------------
 load_dotenv()
@@ -41,6 +40,7 @@ if "messages" not in st.session_state:
     st.session_state.last_known_cluster_name = None
     st.session_state.last_known_cluster_size = None
     st.session_state.available_servers = SERVERS
+    st.session_state.server_tools_cache = {}  # Cache for server tools
 
 # ---------------- HELPERS ----------------
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
@@ -86,24 +86,54 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
-def list_mcp_tools(server_url: str):
-    """Fetch available MCP tools for a specific server."""
+def list_mcp_tools(server_url: str) -> List[Dict[str, Any]]:
+    """Fetch available MCP tools for a specific server with caching."""
+    # Check cache first
+    if server_url in st.session_state.server_tools_cache:
+        return st.session_state.server_tools_cache[server_url]
+    
     resp = direct_mcp_call(server_url, "tools/list")
     if not isinstance(resp, dict):
-        return []
+        tools = []
+    else:
+        # Handle different response formats
+        result = resp.get("result", {})
+        if isinstance(result, dict):
+            tools = result.get("tools", [])
+        elif isinstance(result, list):
+            tools = result
+        elif "tools" in resp:
+            tools = resp["tools"]
+        else:
+            tools = []
     
-    # Handle different response formats
-    result = resp.get("result", {})
-    if isinstance(result, dict):
-        return result.get("tools", [])
-    if isinstance(result, list):
-        return result
+    # Cache the tools
+    st.session_state.server_tools_cache[server_url] = tools
+    return tools
+
+def get_tool_descriptions(server_url: str) -> str:
+    """Get detailed tool descriptions for AI decision making."""
+    tools = list_mcp_tools(server_url)
+    if not tools:
+        return "No tools available"
     
-    # Check if tools are at the root level
-    if "tools" in resp:
-        return resp["tools"]
+    descriptions = []
+    for tool in tools:
+        name = tool.get("name", "unknown")
+        description = tool.get("description", "No description available")
+        input_schema = tool.get("inputSchema", {})
+        properties = input_schema.get("properties", {})
+        
+        param_info = []
+        for param_name, param_details in properties.items():
+            param_type = param_details.get("type", "string")
+            param_desc = param_details.get("description", "No description")
+            param_info.append(f"  - {param_name} ({param_type}): {param_desc}")
+        
+        params_str = "\n".join(param_info) if param_info else "  - No parameters"
+        descriptions.append(f"• {name}:\n  Description: {description}\n  Parameters:\n{params_str}")
     
-    return []
+    return "\n\n".join(descriptions)
 
 def call_tool(server_url: str, name: str, arguments: dict):
     """Execute MCP tool by name with arguments."""
@@ -126,10 +156,9 @@ def sanitize_args(args: dict):
     if "resource" in fixed and "resourceType" not in fixed:
         fixed["resourceType"] = fixed.pop("resource")
     
-    # FIX 1: Handle "all namespaces" request for pods and other resources
+    # Handle "all namespaces" request for pods and other resources
     if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"] and 
         "namespace" not in fixed):
-        # Auto-set allNamespaces for resources that support it
         fixed["allNamespaces"] = True
     
     # Handle explicit "all" namespace request
@@ -158,11 +187,6 @@ def sanitize_args(args: dict):
     if fixed.get("resourceType") in resource_mappings:
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
     
-    # ✅ CRITICAL FIX: DO NOT convert namespace creation to YAML.
-    # Most MCP servers expect: { "resourceType": "namespaces", "name": "abi" }
-    # So we LEAVE the 'name' field as-is and DO NOT create a manifest.
-    # Remove the old YAML conversion logic entirely.
-    
     return fixed
 
 def _extract_json_from_text(text: str) -> Optional[dict]:
@@ -178,227 +202,218 @@ def _extract_json_from_text(text: str) -> Optional[dict]:
         pass
     return None
 
-def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
-    """Automatically detect which server to use based on query content."""
+def intelligent_server_selection(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
+    """Intelligently select the best MCP server based on query analysis."""
+    if not available_servers:
+        return None
+    
     query_lower = query.lower()
     
-    # Check each server's tools to see which one matches the query
-    for server in available_servers:
+    # Use Gemini for intelligent server selection if available
+    if GEMINI_AVAILABLE:
         try:
-            tools = list_mcp_tools(server["url"])
-            tool_names = [t.get("name", "").lower() for t in tools if t.get("name")]
+            server_descriptions = []
+            for server in available_servers:
+                tools = list_mcp_tools(server["url"])
+                tool_names = [t.get("name", "") for t in tools if t.get("name")]
+                server_info = f"- {server['name']} (URL: {server['url']}): Tools available: {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}"
+                server_descriptions.append(server_info)
             
-            # Check if any tool name is mentioned in the query
-            for tool_name in tool_names:
-                if tool_name in query_lower:
+            servers_info = "\n".join(server_descriptions)
+            
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            prompt = f"""
+            Analyze the user query and determine which MCP server is most appropriate.
+            
+            User Query: "{query}"
+            
+            Available Servers:
+            {servers_info}
+            
+            Instructions:
+            - Choose the server whose tools best match the user's request
+            - Consider the server name, available tools, and query context
+            - Return ONLY the server name in this format: "SERVER_NAME"
+            - If no clear match, choose the first server
+            
+            Respond with just the server name:
+            """
+            
+            response = model.generate_content(prompt)
+            selected_server_name = response.text.strip().strip('"').strip("'")
+            
+            # Find the server by name
+            for server in available_servers:
+                if server["name"].lower() == selected_server_name.lower():
                     return server
             
-            # Check for common keywords that match server types
-            server_name = server["name"].lower()
-            
-            # Kubernetes queries
-            if (("kubernetes" in query_lower or "k8s" in query_lower or 
-                 "pod" in query_lower or "namespace" in query_lower or
-                 "deployment" in query_lower or "service" in query_lower or
-                 "secret" in query_lower or "configmap" in query_lower or
-                 "node" in query_lower or "cluster" in query_lower or
-                 "resource" in query_lower or "create" in query_lower or
-                 "delete" in query_lower) and 
-                ("kubernetes" in server_name or "k8s" in server_name)):
-                return server
-                
-            # Jenkins queries
-            if (("jenkins" in query_lower or "job" in query_lower or 
-                 "build" in query_lower or "pipeline" in query_lower) and 
-                "jenkins" in server_name):
-                return server
-                
-            # ArgoCD queries
-            if (("argocd" in query_lower or "application" in query_lower or 
-                 "gitops" in query_lower or "sync" in query_lower) and 
-                "argocd" in server_name):
-                return server
-                
-        except Exception:
-            continue
-    
-    # If no specific server detected, return the first available one
-    return available_servers[0] if available_servers else None
-
-def get_all_cluster_resources(server_url: str):
-    """Get all resources in the cluster by querying multiple resource types."""
-    resource_types = [
-        "pods", "services", "deployments", "configmaps", 
-        "secrets", "namespaces", "nodes"
-    ]
-    
-    all_resources = {}
-    
-    for resource_type in resource_types:
-        try:
-            # FIX 2: Always use allNamespaces for resources that support it
-            params = {"resourceType": resource_type}
-            if resource_type not in ["namespaces", "nodes"]:  # These don't need namespaces
-                params["allNamespaces"] = True
-                
-            response = call_tool(server_url, "kubectl_get", params)
-            
-            if response and not response.get("error"):
-                result = response.get("result", {})
-                if isinstance(result, dict) and "items" in result:
-                    all_resources[resource_type] = result["items"]
-                else:
-                    all_resources[resource_type] = result
-            else:
-                all_resources[resource_type] = f"Error: {response.get('error', 'Unknown error')}"
-                
-            # Small delay to avoid overwhelming the server
-            time.sleep(0.1)
-            
         except Exception as e:
-            all_resources[resource_type] = f"Exception: {str(e)}"
+            st.error(f"AI server selection failed: {str(e)}")
     
-    return all_resources
+    # Fallback: keyword-based selection
+    server_scores = []
+    
+    for server in available_servers:
+        score = 0
+        server_name_lower = server["name"].lower()
+        tools = list_mcp_tools(server["url"])
+        tool_names = [t.get("name", "").lower() for t in tools if t.get("name")]
+        
+        # Score based on server name keywords
+        if "kube" in server_name_lower or "kubernetes" in server_name_lower:
+            if any(word in query_lower for word in ["pod", "node", "namespace", "deployment", "service", "secret", "configmap", "cluster", "kube", "k8s"]):
+                score += 10
+        if "jenkins" in server_name_lower:
+            if any(word in query_lower for word in ["jenkins", "job", "build", "pipeline", "ci/cd"]):
+                score += 10
+        if "argo" in server_name_lower:
+            if any(word in query_lower for word in ["argo", "gitops", "application", "sync", "deploy"]):
+                score += 10
+        
+        # Score based on tool names matching query
+        for tool_name in tool_names:
+            if tool_name in query_lower:
+                score += 5
+        
+        server_scores.append((server, score))
+    
+    # Return server with highest score, or first server if tie/no score
+    server_scores.sort(key=lambda x: x[1], reverse=True)
+    return server_scores[0][0] if server_scores else available_servers[0]
+
+def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
+    """Intelligently select the best tool and arguments for the query."""
+    tools = list_mcp_tools(server_url)
+    if not tools:
+        return {"tool": None, "args": None, "explanation": "No tools available on this server"}
+    
+    tool_descriptions = get_tool_descriptions(server_url)
+    
+    if GEMINI_AVAILABLE:
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            prompt = f"""
+            Analyze the user query and map it to the most appropriate MCP tool.
+            
+            User Query: "{query}"
+            
+            Available Tools and Their Capabilities:
+            {tool_descriptions}
+            
+            Instructions:
+            - Choose the most specific tool that matches the query
+            - Extract relevant parameters from the query
+            - For Kubernetes operations:
+              * Use allNamespaces=true when user asks for "all" resources or doesn't specify namespace
+              * For namespace creation: use resourceType: "namespaces" and name parameter
+              * For resource listing: use appropriate resourceType
+            - For any creation/deletion operations, identify the target resource
+            - Return ONLY valid JSON in this exact format:
+            {{
+                "tool": "exact_tool_name",
+                "args": {{
+                    "param1": "value1",
+                    "param2": "value2"
+                }},
+                "explanation": "Brief explanation of choice"
+            }}
+            - If no tool matches, set tool to null
+            
+            Respond with ONLY the JSON:
+            """
+            
+            response = model.generate_content(prompt)
+            text = response.text.strip()
+            
+            # Extract JSON from response
+            parsed = None
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = _extract_json_from_text(text)
+            
+            if parsed and parsed.get("tool"):
+                parsed["args"] = sanitize_args(parsed.get("args") or {})
+                return parsed
+                
+        except Exception as e:
+            st.error(f"AI tool selection failed: {str(e)}")
+    
+    # Fallback: pattern-based tool selection
+    query_lower = query.lower()
+    
+    # Check each tool for matches
+    for tool in tools:
+        tool_name = tool.get("name", "").lower()
+        tool_description = tool.get("description", "").lower()
+        
+        # Simple keyword matching
+        tool_keywords = tool_name.split('_') + tool_description.split()
+        
+        for keyword in tool_keywords:
+            if len(keyword) > 3 and keyword in query_lower:
+                # Try to extract basic arguments
+                args = extract_arguments_from_query(query, tool.get("inputSchema", {}))
+                return {
+                    "tool": tool["name"],
+                    "args": sanitize_args(args),
+                    "explanation": f"Matched tool '{tool['name']}' based on keyword '{keyword}'"
+                }
+    
+    return {"tool": None, "args": None, "explanation": "No suitable tool found for this query"}
+
+def extract_arguments_from_query(query: str, input_schema: dict) -> dict:
+    """Extract arguments from natural language query based on tool schema."""
+    args = {}
+    properties = input_schema.get("properties", {})
+    query_lower = query.lower()
+    
+    for param_name, param_schema in properties.items():
+        param_type = param_schema.get("type", "string")
+        
+        # Look for parameter values in query
+        if param_name in ["resourceType", "resource"]:
+            # Extract resource type
+            resource_patterns = [
+                r'(?:pod|pods|deployment|deployments|service|services|namespace|namespaces|node|nodes|secret|secrets|configmap|configmaps)',
+                r'all\s+resources?',
+                r'all\s+namespaces?'
+            ]
+            
+            for pattern in resource_patterns:
+                matches = re.findall(pattern, query_lower)
+                if matches:
+                    args[param_name] = matches[0] + 's' if not matches[0].endswith('s') else matches[0]
+                    break
+        
+        elif param_name in ["name", "namespace"]:
+            # Extract names - look for words after keywords
+            if param_name == "name" and "namespace" in query_lower:
+                namespace_match = re.search(r'namespace[:\s]+([\w-]+)', query_lower)
+                if namespace_match:
+                    args[param_name] = namespace_match.group(1)
+            
+            # General name extraction
+            words = query.split()
+            for i, word in enumerate(words):
+                if word.lower() in ["named", "called", "name", "namespace"] and i + 1 < len(words):
+                    args[param_name] = words[i + 1]
+                    break
+        
+        elif param_name == "allNamespaces":
+            if "all namespaces" in query_lower or "all namespace" in query_lower or "ella namespace" in query_lower:
+                args[param_name] = True
+        
+        elif param_name == "allResources":
+            if "all resources" in query_lower or "ella resource" in query_lower:
+                args[param_name] = True
+    
+    return args
 
 # ---------------- GEMINI FUNCTIONS ----------------
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
-    tools = list_mcp_tools(server_url)
-    tool_names = [t["name"] for t in tools if "name" in t]
-
-    # Inject context from session state if available
-    context_notes = ""
-    if st.session_state.last_known_cluster_name:
-        context_notes += f"\nUser previously interacted with cluster: {st.session_state.last_known_cluster_name}"
-    if st.session_state.last_known_cluster_size:
-        context_notes += f"\nLast known cluster size: {st.session_state.last_known_cluster_size} nodes"
-
-    instruction = f"""
-You are an AI agent that maps user queries to MCP tools.
-User query: "{query}"
-{context_notes}
-
-Available tools in this MCP server: {json.dumps(tool_names, indent=2)}
-
-IMPORTANT RULES FOR KUBERNETES:
-- When user asks for "all pods", "show all pods", or similar, ALWAYS set allNamespaces=true
-- When user wants to see resources across all namespaces, use allNamespaces=true
-- For pods, services, deployments, secrets, configmaps - default to all namespaces unless specified
-- For nodes and namespaces, don't use namespace parameters
-- For creating namespaces: use kubectl_create with resourceType: "namespaces" and name: "<namespace_name>"
-- For deleting namespaces: use kubectl_delete with resourceType: "namespaces" and name: "<namespace_name>"
-
-Rules:
-- Only choose from the tools above.
-- If the query clearly maps to a tool, return tool + args in JSON.
-- If the user asks for "all resources" or "everything in cluster", use kubectl_get with appropriate arguments.
-- If unsure, set tool=null and args=null.
-
-Respond ONLY in strict JSON:
-{{"tool": "<tool_name>" | null, "args": {{}} | null, "explanation": "Short explanation"}}
-"""
-    if not GEMINI_AVAILABLE:
-        # Enhanced fallback logic
-        query_lower = query.lower()
-        
-        # Handle namespace creation
-        if any(word in query_lower for word in ["create namespace", "create ns", "make namespace"]):
-            # Extract namespace name from query
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
-            if namespace_match:
-                namespace_name = namespace_match.group(1)
-                return {
-                    "tool": "kubectl_create",
-                    "args": {"resourceType": "namespaces", "name": namespace_name},
-                    "explanation": f"Creating namespace '{namespace_name}'"
-                }
-            else:
-                # Try to extract any word after "create namespace"
-                words = query_lower.split()
-                try:
-                    idx = words.index("namespace") if "namespace" in words else words.index("ns")
-                    if idx + 1 < len(words):
-                        namespace_name = words[idx + 1]
-                        if namespace_name.isalnum() or '-' in namespace_name:
-                            return {
-                                "tool": "kubectl_create",
-                                "args": {"resourceType": "namespaces", "name": namespace_name},
-                                "explanation": f"Creating namespace '{namespace_name}'"
-                            }
-                except:
-                    pass
-        
-        # Handle namespace deletion
-        if any(word in query_lower for word in ["delete namespace", "delete ns", "remove namespace"]):
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', query_lower)
-            if namespace_match:
-                namespace_name = namespace_match.group(1)
-                return {
-                    "tool": "kubectl_delete",
-                    "args": {"resourceType": "namespaces", "name": namespace_name},
-                    "explanation": f"Deleting namespace '{namespace_name}'"
-                }
-        
-        # Handle "all pods in all namespaces" requests
-        if any(phrase in query_lower for phrase in ["all pods", "all pod", "all namespace", "all namespaces", "ella pod", "ella namespace"]):
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods across all namespaces"
-            }
-        elif "all resources" in query_lower or "everything" in query_lower or "ella resource" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "all", "allNamespaces": True},
-                "explanation": "User wants to see all resources in cluster across all namespaces"
-            }
-        elif "pods" in query_lower or "pod" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "pods", "allNamespaces": True},
-                "explanation": "User wants to see all pods across all namespaces"
-            }
-        elif "services" in query_lower or "svc" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "services", "allNamespaces": True},
-                "explanation": "User wants to see all services across all namespaces"
-            }
-        elif "secrets" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "secrets", "allNamespaces": True},
-                "explanation": "User wants to see all secrets across all namespaces"
-            }
-        elif "nodes" in query_lower:
-            return {
-                "tool": "kubectl_get",
-                "args": {"resourceType": "nodes"},
-                "explanation": "User wants to see all nodes"
-            }
-        else:
-            return {"tool": None, "args": None, "explanation": "Gemini not configured; fallback to chat reply."}
-    
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(instruction)
-        text = response.text.strip()
-        
-        # Try to extract JSON from response
-        parsed = None
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = _extract_json_from_text(text)
-        
-        if not parsed:
-            parsed = {"tool": None, "args": None, "explanation": f"Gemini invalid response: {text}"}
-        
-        parsed["args"] = sanitize_args(parsed.get("args") or {})
-        return parsed
-        
-    except Exception as e:
-        return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+    return intelligent_tool_selection(query, server_url)
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
     """Use Gemini to convert raw MCP response into human-friendly answer."""
@@ -459,111 +474,35 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     
     result = raw_response.get("result", {})
     
-    # Handle namespace creation success
-    if "create" in user_input.lower() and "namespace" in user_input.lower():
-        if result and not result.get("error"):
-            # Extract namespace name from user input
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', user_input.lower())
-            namespace_name = namespace_match.group(1) if namespace_match else "the requested"
-            return f"✅ Successfully created namespace '{namespace_name}'!"
-    
-    # Handle namespace deletion success
-    if "delete" in user_input.lower() and "namespace" in user_input.lower():
-        if result and not result.get("error"):
-            namespace_match = re.search(r'(?:namespace|ns)[\s]+([\w-]+)', user_input.lower())
-            namespace_name = namespace_match.group(1) if namespace_match else "the requested"
-            return f"✅ Successfully deleted namespace '{namespace_name}'!"
+    # Handle namespace operations
+    if "namespace" in user_input.lower():
+        if "create" in user_input.lower() and result and not result.get("error"):
+            return "✅ Namespace created successfully!"
+        if "delete" in user_input.lower() and result and not result.get("error"):
+            return "✅ Namespace deleted successfully!"
     
     # Handle different response formats
     if isinstance(result, dict):
-        # Kubernetes-style responses with items
         if "items" in result:
             items = result["items"]
             count = len(items)
             
-            if "node" in user_input.lower() or "cluster size" in user_input.lower():
-                if count == 1:
-                    node_name = items[0].get("metadata", {}).get("name", "unknown")
-                    return f"This is a single-node cluster. The node is named: {node_name}"
-                else:
-                    return f"The cluster has {count} nodes."
-            
-            if "namespace" in user_input.lower():
-                namespaces = [item.get("metadata", {}).get("name", "unnamed") for item in items]
-                if namespaces:
-                    return f"Found {count} namespaces:\n" + "\n".join([f"• {ns}" for ns in namespaces])
-                else:
-                    return "No namespaces found."
-            
-            if "pod" in user_input.lower():
-                # Show namespace information for pods
-                pods_info = []
-                for item in items:
-                    name = item.get('metadata', {}).get('name', 'unnamed')
-                    namespace = item.get('metadata', {}).get('namespace', 'default')
-                    status = item.get('status', {}).get('phase', 'Unknown')
-                    pods_info.append(f"{name} (Namespace: {namespace}, Status: {status})")
+            if count > 0:
+                resource_type = "resources"
+                if "pod" in user_input.lower():
+                    resource_type = "pods"
+                elif "service" in user_input.lower():
+                    resource_type = "services"
+                elif "node" in user_input.lower():
+                    resource_type = "nodes"
+                elif "namespace" in user_input.lower():
+                    resource_type = "namespaces"
                 
-                if pods_info:
-                    return f"Found {count} pods across all namespaces:\n" + "\n".join([f"• {pod}" for pod in pods_info])
-                else:
-                    return "No pods found in any namespace."
-            
-            if "secret" in user_input.lower():
-                secrets = [f"{item.get('metadata', {}).get('name', 'unnamed')} in {item.get('metadata', {}).get('namespace', 'default')} namespace" for item in items]
-                if secrets:
-                    return f"Found {count} secrets across all namespaces:\n" + "\n".join([f"• {secret}" for secret in secrets])
-                else:
-                    return "No secrets found in any namespace."
-        
-        # Handle all-resources response
-        if any(key in result for key in ["pods", "services", "deployments", "configmaps", "secrets", "namespaces", "nodes"]):
-            summary = "**Cluster Resources Summary:**\n\n"
-            total_count = 0
-            
-            for resource_type, resources in result.items():
-                if isinstance(resources, list):
-                    count = len(resources)
-                    total_count += count
-                    summary += f"• {resource_type.capitalize()}: {count}\n"
-                elif "items" in str(resources):
-                    # Handle nested items structure
-                    try:
-                        if isinstance(resources, dict) and "items" in resources:
-                            count = len(resources["items"])
-                            total_count += count
-                            summary += f"• {resource_type.capitalize()}: {count}\n"
-                    except:
-                        summary += f"• {resource_type.capitalize()}: Data available\n"
-            
-            return f"{summary}\nTotal resources found: {total_count}"
-        
-        # Jenkins-style responses
-        if "jobs" in result:
-            jobs = result["jobs"]
-            if jobs:
-                return f"Found {len(jobs)} Jenkins jobs:\n" + "\n".join([f"• {job.get('name', 'unnamed')}" for job in jobs])
+                return f"✅ Found {count} {resource_type} in the cluster."
             else:
-                return "No Jenkins jobs found."
-        
-        # ArgoCD-style responses
-        if "applications" in result:
-            apps = result["applications"]
-            if apps:
-                return f"Found {len(apps)} ArgoCD applications:\n" + "\n".join([f"• {app.get('name', 'unnamed')}" for app in apps])
-            else:
-                return "No ArgoCD applications found."
+                return f"No resources found for your query."
     
-    # Generic fallback for successful operations
-    if result and not result.get("error"):
-        if "create" in user_input.lower():
-            return "✅ Operation completed successfully!"
-        elif "delete" in user_input.lower():
-            return "✅ Operation completed successfully!"
-        else:
-            return "✅ Operation completed successfully. Found data across all namespaces."
-    
-    return "Operation completed, but no specific data was returned."
+    return "✅ Operation completed successfully."
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
     """Extract cluster name/size from Gemini answer and store in session."""
@@ -593,27 +532,27 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 MaSaOps Bot")
+    st.title("🤖 Intelligent MCP Assistant")
 
     # Sidebar with settings
     with st.sidebar:
         st.header("⚙️ Settings")
         
         # Server discovery
-        if st.button("Discover Available Servers"):
+        if st.button("🔄 Refresh Server List"):
             with st.spinner("Discovering MCP servers..."):
-                st.success(f"Found {len(SERVERS)} servers")
-                for server in SERVERS:
-                    st.write(f"• {server['name']}: {server['url']}")
+                st.session_state.available_servers = load_servers()
+                st.session_state.server_tools_cache = {}  # Clear cache
+                st.success(f"Found {len(st.session_state.available_servers)} servers")
         
         st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
         
-        if st.button("Clear Chat History"):
+        if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
             st.rerun()
 
     # Main chat interface
-    st.subheader("What's on your mind today? 🤔")
+    st.subheader("Chat with your MCP Servers 🚀")
     
     # Display chat history
     for msg in st.session_state.messages:
@@ -631,9 +570,9 @@ def main():
     with st.chat_message("user"):
         st.markdown(user_prompt)
     
-    # Auto-detect which server to use based on query
-    with st.spinner("🔍 Finding the right server for your query..."):
-        selected_server = detect_server_from_query(user_prompt, SERVERS)
+    # Intelligent server selection
+    with st.spinner("🔍 Selecting the best server for your query..."):
+        selected_server = intelligent_server_selection(user_prompt, st.session_state.available_servers)
     
     if not selected_server:
         error_msg = "No MCP servers available. Please check your servers.json file."
@@ -643,16 +582,25 @@ def main():
         return
     
     # Show which server we're using
-    server_info = f"🤖 Using server: **{selected_server['name']}**"
+    server_info = f"**🤖 Selected Server:** {selected_server['name']}\n\n**🔧 Available Tools:**"
+    tools = list_mcp_tools(selected_server["url"])
+    if tools:
+        tool_names = [f"`{tool['name']}`" for tool in tools[:8]]  # Show first 8 tools
+        server_info += " " + ", ".join(tool_names)
+        if len(tools) > 8:
+            server_info += f" ... and {len(tools) - 8} more"
+    else:
+        server_info += " No tools found"
+    
     st.session_state.messages.append({"role": "assistant", "content": server_info})
     with st.chat_message("assistant"):
         st.markdown(server_info)
     
-    # Use Gemini to determine the best tool and arguments
-    with st.spinner("🤔 Analyzing your request..."):
-        decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
+    # Intelligent tool selection
+    with st.spinner("🤔 Analyzing your request and selecting the right tool..."):
+        decision = intelligent_tool_selection(user_prompt, selected_server["url"])
     
-    explanation = decision.get("explanation", "I'm figuring out how to help you...")
+    explanation = decision.get("explanation", "Analyzing your request...")
     st.session_state.messages.append({"role": "assistant", "content": f"💡 {explanation}"})
     with st.chat_message("assistant"):
         st.markdown(f"💡 {explanation}")
@@ -663,19 +611,11 @@ def main():
     # Execute tool if one was selected
     if tool_name:
         with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}`...")
+            st.markdown(f"🔧 Executing `{tool_name}` with parameters: `{tool_args}`...")
         
-        # Special handling for "all resources" request
-        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-            ("all" in user_prompt.lower() and "resource" in user_prompt.lower()) or
-            "ella resource" in user_prompt.lower()):
-            with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
-                all_resources = get_all_cluster_resources(selected_server["url"])
-                resp = {"result": all_resources}
-        else:
-            # Call the tool normally
-            with st.spinner("🔄 Processing your request..."):
-                resp = call_tool(selected_server["url"], tool_name, tool_args)
+        # Call the tool
+        with st.spinner("🔄 Processing your request..."):
+            resp = call_tool(selected_server["url"], tool_name, tool_args)
         
         # Generate human-readable response
         with st.spinner("📝 Formatting response..."):
@@ -687,25 +627,37 @@ def main():
             st.markdown(final_answer)
     
     else:
-        # No tool selected - provide helpful suggestions
-        helpful_response = (
-            "I couldn't find a specific tool to answer your question. Here are some things you can try:\n\n"
-            "**For Kubernetes:**\n"
-            "- \"Create namespace abinesh\"\n"
-            "- \"Delete namespace undefined\"\n"
-            "- \"List all pods in all namespaces\"\n"
-            "- \"Show all services across all namespaces\"\n"
-            "- \"Get cluster nodes\"\n"
-            "- \"List all secrets in all namespaces\"\n"
-            "- \"Show all resources in cluster\"\n\n"
-            "**For Jenkins:**\n"
-            "- \"List all jobs\"\n"
-            "- \"Show build status\"\n\n"
-            "**For ArgoCD:**\n"
-            "- \"List applications\"\n"
-            "- \"Show application status\"\n\n"
-            "Or try being more specific about what you'd like to see!"
-        )
+        # No tool selected - provide helpful suggestions based on available tools
+        tools = list_mcp_tools(selected_server["url"])
+        if tools:
+            helpful_response = (
+                f"I couldn't find a specific tool to handle your query. Here are the tools available on **{selected_server['name']}**:\n\n"
+            )
+            
+            # Group tools by type for better organization
+            k8s_tools = [t for t in tools if "kubectl" in t.get("name", "").lower() or any(kw in t.get("name", "").lower() for kw in ["get", "create", "delete", "describe"])]
+            other_tools = [t for t in tools if t not in k8s_tools]
+            
+            if k8s_tools:
+                helpful_response += "**Kubernetes Operations:**\n"
+                for tool in k8s_tools[:5]:  # Show first 5
+                    helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
+                helpful_response += "\n"
+            
+            if other_tools:
+                helpful_response += "**Other Operations:**\n"
+                for tool in other_tools[:5]:  # Show first 5
+                    helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
+            
+            if len(tools) > 10:
+                helpful_response += f"\n... and {len(tools) - 10} more tools available."
+            
+            helpful_response += "\n\n**Try phrasing your request using these tool names or be more specific about what you'd like to do!**"
+        else:
+            helpful_response = (
+                "No tools are available on this server. Please check if the MCP server is running properly "
+                "or try a different server."
+            )
         
         st.session_state.messages.append({"role": "assistant", "content": helpful_response})
         with st.chat_message("assistant"):
@@ -713,6 +665,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"final error analysing code but namespace is not created in this code "
