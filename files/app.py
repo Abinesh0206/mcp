@@ -11,7 +11,7 @@ import re
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Configure Gemini if available
@@ -349,37 +349,27 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
             CRITICAL RULES FOR KUBERNETES:
             1. kubectl_create: ALWAYS use SINGULAR resourceType
                - "create namespace abc" → {{tool: "kubectl_create", args: {{resourceType: "namespace", name: "abc"}}}}
+               - "create pod xyz" → {{tool: "kubectl_create", args: {{resourceType: "pod", name: "xyz"}}}}
             
             2. kubectl_get: ALWAYS use PLURAL resourceType
                - "get all pods" → {{tool: "kubectl_get", args: {{resourceType: "pods", allNamespaces: true}}}}
+               - "get all namespaces" → {{tool: "kubectl_get", args: {{resourceType: "namespaces"}}}}
                - "get pods in default" → {{tool: "kubectl_get", args: {{resourceType: "pods", namespace: "default"}}}}
-               - "all resources in masabot namespace" → {{tool: "kubectl_get", args: {{namespace: "masabot"}}}}
             
-            3. kubectl_describe: Use SINGULAR resourceType + exact name
-               - "describe pod abc-123" → {{tool: "kubectl_describe", args: {{resourceType: "pod", name: "abc-123", namespace: "namespace-name"}}}}
+            3. kubectl_describe: Use SINGULAR resourceType
+               - "describe node xyz" → {{tool: "kubectl_describe", args: {{resourceType: "node", name: "xyz"}}}}
             
-            4. kubectl_logs: Requires exact pod name and namespace
-               - "logs masabot-ui-77dbd7d9fd-6xrcf masabot namespace" → {{tool: "kubectl_logs", args: {{name: "masabot-ui-77dbd7d9fd-6xrcf", namespace: "masabot"}}}}
-               - "show logs pod-name in namespace-name" → {{tool: "kubectl_logs", args: {{name: "pod-name", namespace: "namespace-name"}}}}
+            4. kubectl_delete: Use SINGULAR resourceType
+               - "delete namespace abc" → {{tool: "kubectl_delete", args: {{resourceType: "namespace", name: "abc"}}}}
             
-            5. kubectl_delete: Use SINGULAR resourceType
+            5. Tool names must EXACTLY match the available tools
+            6. Only include parameters that are defined in the tool schema
             
-            IMPORTANT EXTRACTION RULES:
-            - Extract EXACT pod names (format: name-hash-hash like masabot-ui-77dbd7d9fd-6xrcf)
-            - Extract namespace from phrases: "in X namespace", "X namespace", "namespace X"
-            - When user says "logs about X" or "logs X", X is the pod name
-            - For "all resources in X namespace", use kubectl_get with namespace parameter only
-            - For specific pod operations (logs, describe), ALWAYS include both name and namespace
-            
-            Examples:
-            - "logs masabot-ui-77dbd7d9fd-6xrcf masabot namespace" → 
-              {{tool: "kubectl_logs", args: {{name: "masabot-ui-77dbd7d9fd-6xrcf", namespace: "masabot"}}}}
-            
-            - "describe pod masabot-ui-77dbd7d9fd-6xrcf in masabot" → 
-              {{tool: "kubectl_describe", args: {{resourceType: "pod", name: "masabot-ui-77dbd7d9fd-6xrcf", namespace: "masabot"}}}}
-            
-            - "all resources in masabot namespace" → 
-              {{tool: "kubectl_get", args: {{namespace: "masabot"}}}}
+            REMEMBER: 
+            - kubectl_create = SINGULAR (namespace, pod, deployment)
+            - kubectl_get = PLURAL (namespaces, pods, deployments)
+            - kubectl_describe = SINGULAR (namespace, pod, deployment)
+            - kubectl_delete = SINGULAR (namespace, pod, deployment)
             
             Return ONLY valid JSON in this exact format:
             {{
@@ -388,12 +378,12 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
                     "param1": "value1",
                     "param2": "value2"
                 }},
-                "explanation": "Brief explanation"
+                "explanation": "Brief explanation of choice"
             }}
             
             If no tool matches, set tool to null.
             
-            Respond with ONLY the JSON (no markdown, no extra text):
+            Respond with ONLY the JSON:
             """
             
             response = model.generate_content(prompt)
@@ -425,70 +415,6 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
     # Fallback: pattern-based tool selection
     query_lower = query.lower()
     
-    # ENHANCED: Check for kubectl_logs operations
-    if any(word in query_lower for word in ["logs", "log"]):
-        # Try to extract pod name and namespace
-        pod_name_pattern = r'\b([\w]+-[\w]+-[a-z0-9]{8,10}-[a-z0-9]{5})\b'
-        pod_match = re.search(pod_name_pattern, query)
-        
-        namespace_patterns = [
-            r'(?:in|inside|from|namespace)\s+([\w-]+)\s+namespace',
-            r'namespace\s+([\w-]+)',
-            r'([\w-]+)\s+namespace',
-        ]
-        
-        namespace = None
-        for pattern in namespace_patterns:
-            ns_match = re.search(pattern, query_lower)
-            if ns_match:
-                namespace = ns_match.group(1)
-                break
-        
-        if pod_match:
-            tool_schema = find_tool_by_name(tools, "kubectl_logs")
-            args = {"name": pod_match.group(1)}
-            if namespace:
-                args["namespace"] = namespace
-            return {
-                "tool": "kubectl_logs",
-                "args": args,
-                "explanation": f"Fetching logs for pod '{pod_match.group(1)}'" + (f" in namespace '{namespace}'" if namespace else "")
-            }
-    
-    # ENHANCED: Check for kubectl_describe operations
-    if "describe" in query_lower:
-        # Extract resource type
-        resource_match = re.search(r'describe\s+(pod|deployment|service|node|namespace)\s+([\w-]+)', query_lower)
-        if resource_match:
-            resource_type = resource_match.group(1)
-            resource_name = resource_match.group(2)
-            
-            # Try to find namespace
-            namespace_match = re.search(r'(?:in|inside|namespace)\s+([\w-]+)', query_lower)
-            namespace = namespace_match.group(1) if namespace_match else None
-            
-            tool_schema = find_tool_by_name(tools, "kubectl_describe")
-            args = {"resourceType": resource_type, "name": resource_name}
-            if namespace:
-                args["namespace"] = namespace
-            
-            return {
-                "tool": "kubectl_describe",
-                "args": args,
-                "explanation": f"Describing {resource_type} '{resource_name}'"
-            }
-    
-    # ENHANCED: Check for namespace-specific resource listing
-    if "all resources" in query_lower or "resources in" in query_lower:
-        namespace_match = re.search(r'(?:in|inside)\s+([\w-]+)\s+namespace', query_lower)
-        if namespace_match:
-            tool_schema = find_tool_by_name(tools, "kubectl_get")
-            return {
-                "tool": "kubectl_get",
-                "args": {"namespace": namespace_match.group(1)},
-                "explanation": f"Listing all resources in namespace '{namespace_match.group(1)}'"
-            }
-    
     # Check for specific operations
     if "create" in query_lower and "namespace" in query_lower:
         # Extract namespace name
@@ -501,10 +427,9 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
         
         if namespace_name:
             tool_schema = find_tool_by_name(tools, "kubectl_create")
-            # kubectl_create MUST use singular "namespace" not "namespaces"
             return {
                 "tool": "kubectl_create",
-                "args": {"resourceType": "namespace", "name": namespace_name},
+                "args": sanitize_args({"resourceType": "namespace", "name": namespace_name}, tool_schema),
                 "explanation": f"Creating namespace '{namespace_name}' using kubectl_create"
             }
     
@@ -533,103 +458,53 @@ def extract_arguments_from_query(query: str, input_schema: dict) -> dict:
     args = {}
     properties = input_schema.get("properties", {})
     query_lower = query.lower()
-    words = query.split()
     
     for param_name, param_schema in properties.items():
         param_type = param_schema.get("type", "string")
         
-        # Extract resourceType
+        # Look for parameter values in query
         if param_name in ["resourceType", "resource"]:
+            # Extract resource type
             resource_patterns = [
-                r'\b(pods?|deployments?|services?|namespaces?|nodes?|secrets?|configmaps?|replicasets?|statefulsets?|daemonsets?)\b'
+                r'\b(pods?|deployments?|services?|namespaces?|nodes?|secrets?|configmaps?)\b'
             ]
             
             for pattern in resource_patterns:
                 matches = re.findall(pattern, query_lower)
                 if matches:
                     resource = matches[0]
-                    # Pluralize if needed (for kubectl_get)
+                    # Pluralize if needed
                     if not resource.endswith('s'):
                         resource = resource + 's'
                     args[param_name] = resource
                     break
         
-        # Extract pod/resource name - ENHANCED logic
         elif param_name == "name":
-            # Look for exact pod names (contain hyphens and random suffixes)
-            pod_name_pattern = r'\b([\w]+-[\w]+-[a-z0-9]{8,10}-[a-z0-9]{5})\b'
-            pod_match = re.search(pod_name_pattern, query)
-            if pod_match:
-                args[param_name] = pod_match.group(1)
-            else:
-                # Look for deployment/service names
-                name_patterns = [
-                    r'(?:pod|deployment|service|node|namespace|resource)\s+([\w-]+)',
-                    r'named?\s+([\w-]+)',
-                    r'called\s+([\w-]+)',
-                ]
-                
-                for pattern in name_patterns:
-                    match = re.search(pattern, query_lower)
-                    if match:
-                        args[param_name] = match.group(1)
-                        break
-                
-                # Fallback: look for words after namespace keyword
-                if not args.get(param_name):
-                    for i, word in enumerate(words):
-                        if word.lower() in ["namespace", "ns"] and i + 1 < len(words):
-                            potential_name = words[i + 1]
-                            if potential_name.lower() not in ["in", "inside", "from", "of"]:
-                                args[param_name] = potential_name
-                                break
-        
-        # Extract namespace - ENHANCED logic
-        elif param_name == "namespace":
-            namespace_patterns = [
-                r'(?:in|inside|from|namespace)\s+([\w-]+)\s+namespace',
-                r'namespace\s+([\w-]+)',
-                r'-n\s+([\w-]+)',
+            # Extract name - look for words after keywords
+            patterns = [
+                r'namespace[:\s]+([\w-]+)',
+                r'named?[:\s]+([\w-]+)',
+                r'called[:\s]+([\w-]+)',
             ]
             
-            for pattern in namespace_patterns:
+            for pattern in patterns:
                 match = re.search(pattern, query_lower)
                 if match:
-                    ns = match.group(1)
-                    if ns not in ["the", "a", "an"]:
-                        args[param_name] = ns
-                        break
+                    args[param_name] = match.group(1)
+                    break
         
-        # Extract allNamespaces flag
+        elif param_name == "namespace":
+            # Extract namespace
+            namespace_match = re.search(r'(?:in|namespace)[:\s]+([\w-]+)', query_lower)
+            if namespace_match:
+                args[param_name] = namespace_match.group(1)
+        
         elif param_name == "allNamespaces":
-            if any(phrase in query_lower for phrase in [
-                "all namespaces", "all namespace", "across namespaces", 
-                "cluster-wide", "in cluster", "entire cluster"
-            ]):
+            if any(phrase in query_lower for phrase in ["all namespaces", "all namespace", "across namespaces", "cluster-wide"]):
                 args[param_name] = True
         
-        # Extract allResources flag
         elif param_name == "allResources":
             if "all resources" in query_lower:
-                args[param_name] = True
-        
-        # Extract container name (for logs)
-        elif param_name == "container":
-            container_match = re.search(r'container\s+([\w-]+)', query_lower)
-            if container_match:
-                args[param_name] = container_match.group(1)
-        
-        # Extract lines (for logs)
-        elif param_name == "lines":
-            lines_match = re.search(r'(\d+)\s+lines?', query_lower)
-            if lines_match:
-                args[param_name] = int(lines_match.group(1))
-            elif "last" in query_lower:
-                args[param_name] = 100  # Default to last 100 lines
-        
-        # Extract follow flag (for logs)
-        elif param_name == "follow":
-            if any(word in query_lower for word in ["follow", "tail", "stream", "watch"]):
                 args[param_name] = True
     
     return args
@@ -682,50 +557,18 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
     if "error" in raw_response:
         error_msg = raw_response["error"]
         
-        # Handle common Kubernetes errors with helpful suggestions
-        if "not found" in error_msg.lower() or "404" in error_msg:
-            if "pod" in user_input.lower():
-                # Extract pod name from query if possible
-                pod_pattern = r'\b([\w]+-[\w]+-[a-z0-9]{8,10}-[a-z0-9]{5})\b'
-                pod_match = re.search(pod_pattern, user_input)
-                if pod_match:
-                    return (
-                        f"❌ Pod '{pod_match.group(1)}' not found. \n\n"
-                        "**Possible reasons:**\n"
-                        "• The pod name might have a typo\n"
-                        "• The pod might have been deleted or restarted (pod names change on restart)\n"
-                        "• The pod might be in a different namespace\n\n"
-                        "**Try:** `show all pods in cluster` to see current pod names"
-                    )
-            return (
-                "❌ Resource not found. Please verify:\n"
-                "• The resource name is correct\n"
-                "• The namespace is correct\n"
-                "• The resource still exists"
-            )
-        
-        # Handle namespace creation errors
+        # Handle namespace creation errors specifically
         if "create" in user_input.lower() and "namespace" in user_input.lower():
             if "already exists" in error_msg.lower() or "AlreadyExists" in error_msg:
                 return "✅ This namespace already exists in the cluster."
             elif "forbidden" in error_msg.lower() or "permission" in error_msg.lower():
                 return "❌ I don't have permission to create namespaces. Please check your Kubernetes RBAC permissions."
             else:
-                return f"❌ Couldn't create the namespace: {error_msg}"
+                return f"❌ Couldn't create the namespace. Error: {error_msg}"
         
-        # Handle permission errors
-        if "forbidden" in error_msg.lower() or "unauthorized" in error_msg.lower():
-            return "❌ Permission denied. Please check your Kubernetes RBAC permissions for this operation."
-        
-        # Handle timeout errors
-        if "timeout" in error_msg.lower():
-            return "❌ Request timed out. The Kubernetes API server might be slow or unreachable."
-        
-        # Generic cluster error
         if "cluster" in user_input.lower():
             return "❌ I couldn't retrieve the cluster information. Please check if the MCP server is running."
-        
-        return f"❌ An error occurred: {error_msg}"
+        return f"❌ An issue occurred: {error_msg}"
     
     result = raw_response.get("result", {})
     
@@ -735,14 +578,6 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
         if "create" in user_input.lower() and "namespace" in user_input.lower():
             if result.get("metadata") and result["metadata"].get("name"):
                 return f"✅ Namespace '{result['metadata']['name']}' created successfully!"
-        
-        # Handle logs output
-        if "log" in user_input.lower() and result.get("logs"):
-            return f"**Pod Logs:**\n```\n{result['logs']}\n```"
-        
-        # Handle describe output
-        if "describe" in user_input.lower() and result:
-            return "✅ Resource details retrieved successfully."
         
         # Handle list operations
         if "items" in result:
@@ -759,18 +594,10 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                     resource_type = "nodes"
                 elif "namespace" in user_input.lower():
                     resource_type = "namespaces"
-                elif "deployment" in user_input.lower():
-                    resource_type = "deployments"
                 
-                return f"✅ Found {count} {resource_type}."
+                return f"✅ Found {count} {resource_type} in the cluster."
             else:
                 return "No resources found for your query."
-    
-    # Handle string results (like logs)
-    if isinstance(result, str) and result.strip():
-        if "log" in user_input.lower():
-            return f"**Logs:**\n```\n{result}\n```"
-        return f"✅ {result}"
     
     # Generic success message
     if not raw_response.get("error"):
