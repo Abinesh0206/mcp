@@ -123,12 +123,14 @@ def get_tool_descriptions(server_url: str) -> str:
         description = tool.get("description", "No description available")
         input_schema = tool.get("inputSchema", {})
         properties = input_schema.get("properties", {})
+        required = input_schema.get("required", [])
         
         param_info = []
         for param_name, param_details in properties.items():
             param_type = param_details.get("type", "string")
             param_desc = param_details.get("description", "No description")
-            param_info.append(f"  - {param_name} ({param_type}): {param_desc}")
+            is_required = " (REQUIRED)" if param_name in required else " (optional)"
+            param_info.append(f"  - {param_name} ({param_type}){is_required}: {param_desc}")
         
         params_str = "\n".join(param_info) if param_info else "  - No parameters"
         descriptions.append(f"• {name}:\n  Description: {description}\n  Parameters:\n{params_str}")
@@ -145,47 +147,65 @@ def call_tool(server_url: str, name: str, arguments: dict):
         "arguments": arguments
     })
 
-def sanitize_args(args: dict):
-    """Fix arguments before sending to MCP tools."""
+def sanitize_args(args: dict, tool_schema: dict = None) -> dict:
+    """Fix arguments before sending to MCP tools based on tool schema."""
     if not args:
         return {}
 
     fixed = args.copy()
     
-    # Handle resource/resourceType naming
-    if "resource" in fixed and "resourceType" not in fixed:
-        fixed["resourceType"] = fixed.pop("resource")
+    # Get required parameters from schema if available
+    required_params = []
+    if tool_schema:
+        input_schema = tool_schema.get("inputSchema", {})
+        required_params = input_schema.get("required", [])
+        properties = input_schema.get("properties", {})
     
-    # Handle "all namespaces" request for pods and other resources
-    if (fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps"] and 
-        "namespace" not in fixed):
-        fixed["allNamespaces"] = True
+    # Handle kubectl_create specific logic
+    if tool_schema and tool_schema.get("name") == "kubectl_create":
+        # For kubectl_create, resourceType is typically required
+        if "resourceType" not in fixed and "resource" in fixed:
+            fixed["resourceType"] = fixed.pop("resource")
+        
+        # Ensure namespace operations have proper structure
+        if fixed.get("resourceType") in ["namespace", "namespaces"]:
+            # For namespace creation, only name is needed (not namespace field)
+            if "namespace" in fixed:
+                fixed.pop("namespace")
     
-    # Handle explicit "all" namespace request
-    if fixed.get("namespace") == "all":
-        fixed["allNamespaces"] = True
-        fixed.pop("namespace", None)
+    # Handle kubectl_get specific logic
+    if tool_schema and tool_schema.get("name") == "kubectl_get":
+        # Handle "all namespaces" request
+        if fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps", "nodes"]:
+            if "namespace" not in fixed or fixed.get("namespace") == "all":
+                fixed["allNamespaces"] = True
+                fixed.pop("namespace", None)
+        
+        # Handle explicit "all" namespace request
+        if fixed.get("namespace") == "all":
+            fixed["allNamespaces"] = True
+            fixed.pop("namespace", None)
     
-    # Handle "all resources" request
-    if fixed.get("resourceType") == "all":
-        fixed["allResources"] = True
-        fixed.pop("resourceType", None)
-    
-    # Handle common Kubernetes resource types
+    # Handle common Kubernetes resource type mappings
     resource_mappings = {
         "ns": "namespaces",
         "namespace": "namespaces",
         "pod": "pods",
         "node": "nodes",
         "deploy": "deployments",
+        "deployment": "deployments",
         "svc": "services",
+        "service": "services",
         "cm": "configmaps",
-        "secret": "secrets",
-        "all": "all"
+        "configmap": "configmaps",
+        "secret": "secrets"
     }
     
     if fixed.get("resourceType") in resource_mappings:
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
+    
+    # Remove None values
+    fixed = {k: v for k, v in fixed.items() if v is not None}
     
     return fixed
 
@@ -281,6 +301,13 @@ def intelligent_server_selection(query: str, available_servers: list) -> Optiona
     server_scores.sort(key=lambda x: x[1], reverse=True)
     return server_scores[0][0] if server_scores else available_servers[0]
 
+def find_tool_by_name(tools: List[Dict], tool_name: str) -> Optional[Dict]:
+    """Find a tool by its exact name."""
+    for tool in tools:
+        if tool.get("name") == tool_name:
+            return tool
+    return None
+
 def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
     """Intelligently select the best tool and arguments for the query."""
     tools = list_mcp_tools(server_url)
@@ -300,15 +327,24 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
             Available Tools and Their Capabilities:
             {tool_descriptions}
             
-            Instructions:
-            - Choose the most specific tool that matches the query
-            - Extract relevant parameters from the query
-            - For Kubernetes operations:
-              * Use allNamespaces=true when user asks for "all" resources or doesn't specify namespace
-              * For namespace creation: use resourceType: "namespaces" and name parameter
-              * For resource listing: use appropriate resourceType
-            - For any creation/deletion operations, identify the target resource
-            - Return ONLY valid JSON in this exact format:
+            CRITICAL RULES:
+            1. For namespace creation: Use kubectl_create with {{resourceType: "namespace", name: "namespace_name"}}
+            2. For listing resources across all namespaces: Use kubectl_get with {{resourceType: "resource_type", allNamespaces: true}}
+            3. For listing resources in specific namespace: Use kubectl_get with {{resourceType: "resource_type", namespace: "namespace_name"}}
+            4. For describing resources: Use kubectl_describe
+            5. For deleting resources: Use kubectl_delete
+            6. For scaling deployments: Use kubectl_scale
+            7. For viewing logs: Use kubectl_logs
+            8. Tool names must EXACTLY match the available tools
+            9. Only include parameters that are defined in the tool schema
+            
+            Parameter Mapping Examples:
+            - "create namespace abc" → {{tool: "kubectl_create", args: {{resourceType: "namespace", name: "abc"}}}}
+            - "get all pods" → {{tool: "kubectl_get", args: {{resourceType: "pods", allNamespaces: true}}}}
+            - "get pods in default" → {{tool: "kubectl_get", args: {{resourceType: "pods", namespace: "default"}}}}
+            - "describe node xyz" → {{tool: "kubectl_describe", args: {{resourceType: "node", name: "xyz"}}}}
+            
+            Return ONLY valid JSON in this exact format:
             {{
                 "tool": "exact_tool_name",
                 "args": {{
@@ -317,13 +353,19 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
                 }},
                 "explanation": "Brief explanation of choice"
             }}
-            - If no tool matches, set tool to null
+            
+            If no tool matches, set tool to null.
             
             Respond with ONLY the JSON:
             """
             
             response = model.generate_content(prompt)
             text = response.text.strip()
+            
+            # Remove markdown code blocks if present
+            if text.startswith("```"):
+                text = re.sub(r'^```json?\s*', '', text)
+                text = re.sub(r'\s*```$', '', text)
             
             # Extract JSON from response
             parsed = None
@@ -333,7 +375,11 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
                 parsed = _extract_json_from_text(text)
             
             if parsed and parsed.get("tool"):
-                parsed["args"] = sanitize_args(parsed.get("args") or {})
+                # Find the actual tool schema
+                tool_schema = find_tool_by_name(tools, parsed["tool"])
+                
+                # Sanitize arguments with tool schema
+                parsed["args"] = sanitize_args(parsed.get("args") or {}, tool_schema)
                 return parsed
                 
         except Exception as e:
@@ -341,6 +387,24 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
     
     # Fallback: pattern-based tool selection
     query_lower = query.lower()
+    
+    # Check for specific operations
+    if "create" in query_lower and "namespace" in query_lower:
+        # Extract namespace name
+        words = query.split()
+        namespace_name = None
+        for i, word in enumerate(words):
+            if word.lower() in ["namespace", "ns"] and i + 1 < len(words):
+                namespace_name = words[i + 1]
+                break
+        
+        if namespace_name:
+            tool_schema = find_tool_by_name(tools, "kubectl_create")
+            return {
+                "tool": "kubectl_create",
+                "args": sanitize_args({"resourceType": "namespace", "name": namespace_name}, tool_schema),
+                "explanation": f"Creating namespace '{namespace_name}' using kubectl_create"
+            }
     
     # Check each tool for matches
     for tool in tools:
@@ -356,7 +420,7 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
                 args = extract_arguments_from_query(query, tool.get("inputSchema", {}))
                 return {
                     "tool": tool["name"],
-                    "args": sanitize_args(args),
+                    "args": sanitize_args(args, tool),
                     "explanation": f"Matched tool '{tool['name']}' based on keyword '{keyword}'"
                 }
     
@@ -375,46 +439,50 @@ def extract_arguments_from_query(query: str, input_schema: dict) -> dict:
         if param_name in ["resourceType", "resource"]:
             # Extract resource type
             resource_patterns = [
-                r'(?:pod|pods|deployment|deployments|service|services|namespace|namespaces|node|nodes|secret|secrets|configmap|configmaps)',
-                r'all\s+resources?',
-                r'all\s+namespaces?'
+                r'\b(pods?|deployments?|services?|namespaces?|nodes?|secrets?|configmaps?)\b'
             ]
             
             for pattern in resource_patterns:
                 matches = re.findall(pattern, query_lower)
                 if matches:
-                    args[param_name] = matches[0] + 's' if not matches[0].endswith('s') else matches[0]
+                    resource = matches[0]
+                    # Pluralize if needed
+                    if not resource.endswith('s'):
+                        resource = resource + 's'
+                    args[param_name] = resource
                     break
         
-        elif param_name in ["name", "namespace"]:
-            # Extract names - look for words after keywords
-            if param_name == "name" and "namespace" in query_lower:
-                namespace_match = re.search(r'namespace[:\s]+([\w-]+)', query_lower)
-                if namespace_match:
-                    args[param_name] = namespace_match.group(1)
+        elif param_name == "name":
+            # Extract name - look for words after keywords
+            patterns = [
+                r'namespace[:\s]+([\w-]+)',
+                r'named?[:\s]+([\w-]+)',
+                r'called[:\s]+([\w-]+)',
+            ]
             
-            # General name extraction
-            words = query.split()
-            for i, word in enumerate(words):
-                if word.lower() in ["named", "called", "name", "namespace"] and i + 1 < len(words):
-                    args[param_name] = words[i + 1]
+            for pattern in patterns:
+                match = re.search(pattern, query_lower)
+                if match:
+                    args[param_name] = match.group(1)
                     break
+        
+        elif param_name == "namespace":
+            # Extract namespace
+            namespace_match = re.search(r'(?:in|namespace)[:\s]+([\w-]+)', query_lower)
+            if namespace_match:
+                args[param_name] = namespace_match.group(1)
         
         elif param_name == "allNamespaces":
-            if "all namespaces" in query_lower or "all namespace" in query_lower or "ella namespace" in query_lower:
+            if any(phrase in query_lower for phrase in ["all namespaces", "all namespace", "across namespaces", "cluster-wide"]):
                 args[param_name] = True
         
         elif param_name == "allResources":
-            if "all resources" in query_lower or "ella resource" in query_lower:
+            if "all resources" in query_lower:
                 args[param_name] = True
     
     return args
 
 # ---------------- GEMINI FUNCTIONS ----------------
-def ask_gemini_for_tool_decision(query: str, server_url: str):
-    """Use Gemini to map user query -> MCP tool + arguments."""
-    return intelligent_tool_selection(query, server_url)
-
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
     """Use Gemini to convert raw MCP response into human-friendly answer."""
     if not GEMINI_AVAILABLE:
@@ -436,11 +504,14 @@ def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
             "- Respond in clear, natural, conversational English.\n"
             "- If it's a list, format with bullet points.\n"
             "- If it's status, explain health and issues clearly.\n"
-            "- If error occurred, DO NOT show raw error. Politely explain what went wrong and suggest what user can do.\n"
+            "- If operation succeeded, confirm it clearly with ✅\n"
+            "- If error occurred, explain what went wrong in simple terms and suggest what user can do.\n"
             "- If cluster name or size was inferred, mention that explicitly.\n"
             "- If cluster size = 1, say: 'This appears to be a minimal/single-node cluster.'\n"
             "- NEVER show JSON, code, or internal errors to user unless asked.\n"
-            "- Be helpful, friendly, and precise."
+            "- Be helpful, friendly, and precise.\n"
+            "- For namespace creation success, say: 'Namespace created successfully!'\n"
+            "- For namespace already exists error, say: 'This namespace already exists.'"
         )
         
         resp = model.generate_content(prompt)
@@ -461,28 +532,27 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
         
         # Handle namespace creation errors specifically
         if "create" in user_input.lower() and "namespace" in user_input.lower():
-            if "already exists" in error_msg.lower():
-                return "This namespace already exists in the cluster."
+            if "already exists" in error_msg.lower() or "AlreadyExists" in error_msg:
+                return "✅ This namespace already exists in the cluster."
             elif "forbidden" in error_msg.lower() or "permission" in error_msg.lower():
-                return "I don't have permission to create namespaces. Please check your Kubernetes RBAC permissions."
+                return "❌ I don't have permission to create namespaces. Please check your Kubernetes RBAC permissions."
             else:
-                return f"Sorry, I couldn't create the namespace: {error_msg}"
+                return f"❌ Couldn't create the namespace. Error: {error_msg}"
         
         if "cluster" in user_input.lower():
-            return "I couldn't retrieve the cluster information right now. Please check if the MCP server is running and accessible."
-        return f"Sorry, I encountered an issue: {error_msg}"
+            return "❌ I couldn't retrieve the cluster information. Please check if the MCP server is running."
+        return f"❌ An issue occurred: {error_msg}"
     
     result = raw_response.get("result", {})
     
-    # Handle namespace operations
-    if "namespace" in user_input.lower():
-        if "create" in user_input.lower() and result and not result.get("error"):
-            return "✅ Namespace created successfully!"
-        if "delete" in user_input.lower() and result and not result.get("error"):
-            return "✅ Namespace deleted successfully!"
-    
-    # Handle different response formats
+    # Check for successful operations
     if isinstance(result, dict):
+        # Handle namespace creation success
+        if "create" in user_input.lower() and "namespace" in user_input.lower():
+            if result.get("metadata") and result["metadata"].get("name"):
+                return f"✅ Namespace '{result['metadata']['name']}' created successfully!"
+        
+        # Handle list operations
         if "items" in result:
             items = result["items"]
             count = len(items)
@@ -500,9 +570,13 @@ def generate_fallback_answer(user_input: str, raw_response: dict) -> str:
                 
                 return f"✅ Found {count} {resource_type} in the cluster."
             else:
-                return f"No resources found for your query."
+                return "No resources found for your query."
     
-    return "✅ Operation completed successfully."
+    # Generic success message
+    if not raw_response.get("error"):
+        return "✅ Operation completed successfully."
+    
+    return "Operation completed."
 
 def extract_and_store_cluster_info(user_input: str, answer: str):
     """Extract cluster name/size from Gemini answer and store in session."""
@@ -545,7 +619,7 @@ def main():
                 st.session_state.server_tools_cache = {}  # Clear cache
                 st.success(f"Found {len(st.session_state.available_servers)} servers")
         
-        st.text_input("Gemini API Key", value=GEMINI_API_KEY, disabled=True, type="password")
+        st.text_input("Gemini API Key", value=GEMINI_API_KEY[:20] + "...", disabled=True, type="password")
         
         if st.button("🗑️ Clear Chat History"):
             st.session_state.messages = []
@@ -611,7 +685,7 @@ def main():
     # Execute tool if one was selected
     if tool_name:
         with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing `{tool_name}` with parameters: `{tool_args}`...")
+            st.markdown(f"🔧 Executing `{tool_name}` with parameters: `{json.dumps(tool_args)}`...")
         
         # Call the tool
         with st.spinner("🔄 Processing your request..."):
@@ -627,35 +701,34 @@ def main():
             st.markdown(final_answer)
     
     else:
-        # No tool selected - provide helpful suggestions based on available tools
-        tools = list_mcp_tools(selected_server["url"])
+        # No tool selected - provide helpful suggestions
         if tools:
             helpful_response = (
                 f"I couldn't find a specific tool to handle your query. Here are the tools available on **{selected_server['name']}**:\n\n"
             )
             
-            # Group tools by type for better organization
-            k8s_tools = [t for t in tools if "kubectl" in t.get("name", "").lower() or any(kw in t.get("name", "").lower() for kw in ["get", "create", "delete", "describe"])]
+            # Group tools by type
+            k8s_tools = [t for t in tools if "kubectl" in t.get("name", "").lower()]
             other_tools = [t for t in tools if t not in k8s_tools]
             
             if k8s_tools:
                 helpful_response += "**Kubernetes Operations:**\n"
-                for tool in k8s_tools[:5]:  # Show first 5
+                for tool in k8s_tools[:5]:
                     helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
                 helpful_response += "\n"
             
             if other_tools:
                 helpful_response += "**Other Operations:**\n"
-                for tool in other_tools[:5]:  # Show first 5
+                for tool in other_tools[:5]:
                     helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
             
             if len(tools) > 10:
                 helpful_response += f"\n... and {len(tools) - 10} more tools available."
             
-            helpful_response += "\n\n**Try phrasing your request using these tool names or be more specific about what you'd like to do!**"
+            helpful_response += "\n\n**💡 Try phrasing your request using these tool names or be more specific!**"
         else:
             helpful_response = (
-                "No tools are available on this server. Please check if the MCP server is running properly "
+                "❌ No tools are available on this server. Please check if the MCP server is running properly "
                 "or try a different server."
             )
         
