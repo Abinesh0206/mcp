@@ -11,7 +11,7 @@ import re
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC9wiw7fC2StEswOaINsoOw4Ip4n-9IDa4")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyApANXlk_-Pc0MrveXl6Umq0KLxdk5wr8c")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 # Configure Gemini if available
