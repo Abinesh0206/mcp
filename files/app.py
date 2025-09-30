@@ -167,14 +167,29 @@ def sanitize_args(args: dict, tool_schema: dict = None) -> dict:
         if "resourceType" not in fixed and "resource" in fixed:
             fixed["resourceType"] = fixed.pop("resource")
         
-        # Ensure namespace operations have proper structure
+        # For namespace creation, use SINGULAR form
         if fixed.get("resourceType") in ["namespace", "namespaces"]:
+            fixed["resourceType"] = "namespace"  # MUST be singular for kubectl_create
             # For namespace creation, only name is needed (not namespace field)
             if "namespace" in fixed:
                 fixed.pop("namespace")
     
     # Handle kubectl_get specific logic
     if tool_schema and tool_schema.get("name") == "kubectl_get":
+        # For kubectl_get, use PLURAL forms
+        resource_mappings_get = {
+            "namespace": "namespaces",
+            "pod": "pods",
+            "node": "nodes",
+            "deployment": "deployments",
+            "service": "services",
+            "configmap": "configmaps",
+            "secret": "secrets"
+        }
+        
+        if fixed.get("resourceType") in resource_mappings_get:
+            fixed["resourceType"] = resource_mappings_get[fixed["resourceType"]]
+        
         # Handle "all namespaces" request
         if fixed.get("resourceType") in ["pods", "services", "deployments", "secrets", "configmaps", "nodes"]:
             if "namespace" not in fixed or fixed.get("namespace") == "all":
@@ -186,23 +201,27 @@ def sanitize_args(args: dict, tool_schema: dict = None) -> dict:
             fixed["allNamespaces"] = True
             fixed.pop("namespace", None)
     
-    # Handle common Kubernetes resource type mappings
-    resource_mappings = {
-        "ns": "namespaces",
-        "namespace": "namespaces",
-        "pod": "pods",
-        "node": "nodes",
-        "deploy": "deployments",
-        "deployment": "deployments",
-        "svc": "services",
-        "service": "services",
-        "cm": "configmaps",
-        "configmap": "configmaps",
-        "secret": "secrets"
-    }
+    # Handle kubectl_delete specific logic
+    if tool_schema and tool_schema.get("name") == "kubectl_delete":
+        # For kubectl_delete, use SINGULAR form
+        if fixed.get("resourceType") in ["namespaces"]:
+            fixed["resourceType"] = "namespace"
     
-    if fixed.get("resourceType") in resource_mappings:
-        fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
+    # Handle kubectl_describe specific logic  
+    if tool_schema and tool_schema.get("name") == "kubectl_describe":
+        # For kubectl_describe, typically uses singular
+        resource_mappings_describe = {
+            "namespaces": "namespace",
+            "pods": "pod",
+            "nodes": "node",
+            "deployments": "deployment",
+            "services": "service",
+            "configmaps": "configmap",
+            "secrets": "secret"
+        }
+        
+        if fixed.get("resourceType") in resource_mappings_describe:
+            fixed["resourceType"] = resource_mappings_describe[fixed["resourceType"]]
     
     # Remove None values
     fixed = {k: v for k, v in fixed.items() if v is not None}
@@ -327,22 +346,30 @@ def intelligent_tool_selection(query: str, server_url: str) -> Dict[str, Any]:
             Available Tools and Their Capabilities:
             {tool_descriptions}
             
-            CRITICAL RULES:
-            1. For namespace creation: Use kubectl_create with {{resourceType: "namespace", name: "namespace_name"}}
-            2. For listing resources across all namespaces: Use kubectl_get with {{resourceType: "resource_type", allNamespaces: true}}
-            3. For listing resources in specific namespace: Use kubectl_get with {{resourceType: "resource_type", namespace: "namespace_name"}}
-            4. For describing resources: Use kubectl_describe
-            5. For deleting resources: Use kubectl_delete
-            6. For scaling deployments: Use kubectl_scale
-            7. For viewing logs: Use kubectl_logs
-            8. Tool names must EXACTLY match the available tools
-            9. Only include parameters that are defined in the tool schema
+            CRITICAL RULES FOR KUBERNETES:
+            1. kubectl_create: ALWAYS use SINGULAR resourceType
+               - "create namespace abc" → {{tool: "kubectl_create", args: {{resourceType: "namespace", name: "abc"}}}}
+               - "create pod xyz" → {{tool: "kubectl_create", args: {{resourceType: "pod", name: "xyz"}}}}
             
-            Parameter Mapping Examples:
-            - "create namespace abc" → {{tool: "kubectl_create", args: {{resourceType: "namespace", name: "abc"}}}}
-            - "get all pods" → {{tool: "kubectl_get", args: {{resourceType: "pods", allNamespaces: true}}}}
-            - "get pods in default" → {{tool: "kubectl_get", args: {{resourceType: "pods", namespace: "default"}}}}
-            - "describe node xyz" → {{tool: "kubectl_describe", args: {{resourceType: "node", name: "xyz"}}}}
+            2. kubectl_get: ALWAYS use PLURAL resourceType
+               - "get all pods" → {{tool: "kubectl_get", args: {{resourceType: "pods", allNamespaces: true}}}}
+               - "get all namespaces" → {{tool: "kubectl_get", args: {{resourceType: "namespaces"}}}}
+               - "get pods in default" → {{tool: "kubectl_get", args: {{resourceType: "pods", namespace: "default"}}}}
+            
+            3. kubectl_describe: Use SINGULAR resourceType
+               - "describe node xyz" → {{tool: "kubectl_describe", args: {{resourceType: "node", name: "xyz"}}}}
+            
+            4. kubectl_delete: Use SINGULAR resourceType
+               - "delete namespace abc" → {{tool: "kubectl_delete", args: {{resourceType: "namespace", name: "abc"}}}}
+            
+            5. Tool names must EXACTLY match the available tools
+            6. Only include parameters that are defined in the tool schema
+            
+            REMEMBER: 
+            - kubectl_create = SINGULAR (namespace, pod, deployment)
+            - kubectl_get = PLURAL (namespaces, pods, deployments)
+            - kubectl_describe = SINGULAR (namespace, pod, deployment)
+            - kubectl_delete = SINGULAR (namespace, pod, deployment)
             
             Return ONLY valid JSON in this exact format:
             {{
