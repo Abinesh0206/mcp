@@ -630,6 +630,33 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
     except Exception:
         pass  # silent fail
 
+# ---------------- NEW: GENERAL Q&A WITH GEMINI ----------------
+def answer_general_question(user_input: str) -> str:
+    """Use Gemini to answer general questions when no tool is relevant."""
+    if not GEMINI_AVAILABLE:
+        return (
+            "I can only answer infrastructure-related questions when tools are available. "
+            "For general questions, please provide a valid Gemini API key."
+        )
+    
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        prompt = (
+            f"You are a helpful DevOps and Kubernetes assistant named MaSa Bot. "
+            f"Answer the following question clearly and concisely in a friendly tone:\n\n"
+            f"Question: {user_input}\n\n"
+            "Guidelines:\n"
+            "- Keep answers under 3-4 sentences unless complex.\n"
+            "- If the question is about Kubernetes, cloud, or infrastructure, be precise.\n"
+            "- If unsure, say so politely.\n"
+            "- Never mention internal systems or that you're an AI unless asked.\n"
+            "- Respond in English."
+        )
+        response = model.generate_content(prompt)
+        return getattr(response, "text", "I'm not sure how to answer that.").strip()
+    except Exception as e:
+        return f"Sorry, I couldn't process your question. Error: {str(e)}"
+
 # ---------------- STREAMLIT APP ----------------
 def main():
     st.set_page_config(page_title="MaSa Bot", page_icon="⚡", layout="wide")
@@ -728,40 +755,13 @@ def main():
             st.markdown(final_answer)
     
     else:
-        # No tool selected - provide helpful suggestions
-        if tools:
-            helpful_response = (
-                f"I couldn't find a specific tool to handle your query. Here are the tools available on **{selected_server['name']}**:\n\n"
-            )
-            
-            # Group tools by type
-            k8s_tools = [t for t in tools if "kubectl" in t.get("name", "").lower()]
-            other_tools = [t for t in tools if t not in k8s_tools]
-            
-            if k8s_tools:
-                helpful_response += "**Kubernetes Operations:**\n"
-                for tool in k8s_tools[:5]:
-                    helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
-                helpful_response += "\n"
-            
-            if other_tools:
-                helpful_response += "**Other Operations:**\n"
-                for tool in other_tools[:5]:
-                    helpful_response += f"• `{tool['name']}` - {tool.get('description', 'No description')}\n"
-            
-            if len(tools) > 10:
-                helpful_response += f"\n... and {len(tools) - 10} more tools available."
-            
-            helpful_response += "\n\n**💡 Try phrasing your request using these tool names or be more specific!**"
-        else:
-            helpful_response = (
-                "❌ No tools are available on this server. Please check if the MCP server is running properly "
-                "or try a different server."
-            )
+        # No tool selected → handle as general question
+        with st.spinner("🧠 Thinking..."):
+            general_answer = answer_general_question(user_prompt)
         
-        st.session_state.messages.append({"role": "assistant", "content": helpful_response})
+        st.session_state.messages.append({"role": "assistant", "content": general_answer})
         with st.chat_message("assistant"):
-            st.markdown(helpful_response)
+            st.markdown(general_answer)
 
 if __name__ == "__main__":
     main()
