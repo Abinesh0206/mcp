@@ -632,8 +632,8 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
 
 # ---------------- STREAMLIT APP ----------------
 def main():
-    st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
-    st.title("🤖 Intelligent MCP Assistant")
+    st.set_page_config(page_title="MaSa Bot", page_icon="⚡", layout="wide")
+    st.title("🤖 MaSa Bot")
 
     # Sidebar with settings
     with st.sidebar:
